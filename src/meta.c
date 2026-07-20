@@ -30,8 +30,8 @@ chopin_cached_umask(void)
 
 /* chown_failure_ok (copy.c:2853-2868): benign errnos without
    privileges. */
-static bool
-chown_failure_ok(void)
+bool
+chopin_chown_failure_ok(void)
 {
     return (errno == EPERM || errno == EINVAL || errno == EACCES)
         && geteuid() != 0;
@@ -54,7 +54,7 @@ set_owner_fd(int dest_fd, const char *dst_name,
         if ((old_mode & ~new_mode) != 0
             || (old_mode & (S_ISUID | S_ISGID | S_ISVTX)) != 0) {
             if (fchmod(dest_fd, old_mode & new_mode & S_IRWXU) != 0) {
-                if (!chown_failure_ok()) {
+                if (!chopin_chown_failure_ok()) {
                     chopin_error(errno, "clearing permissions for %s",
                                  chopin_quoteaf(dst_name));
                     return -(int)x->require_preserve;
@@ -66,11 +66,11 @@ set_owner_fd(int dest_fd, const char *dst_name,
 
     if (fchown(dest_fd, src_sb->st_uid, src_sb->st_gid) == 0)
         return 1;
-    if (chown_failure_ok()) {
+    if (chopin_chown_failure_ok()) {
         /* Group-only retry, silently. */
         if (fchown(dest_fd, (uid_t)-1, src_sb->st_gid) == 0)
             return 1;
-        if (chown_failure_ok())
+        if (chopin_chown_failure_ok())
             return 0;
     }
     chopin_error(errno, "failed to preserve ownership for %s",

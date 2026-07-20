@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <fcntl.h>
+
+#include "copy.h"
 #include "util.h"
 
 struct triple {
@@ -46,14 +49,17 @@ table_add(struct table *t, const char *name, const struct stat *sb)
     t->len++;
 }
 
-/* src_info: inode-only compare (triple_hash_no_name/
-   triple_compare_ino). */
+/* src_info: hashed without the name but COMPARED with it
+   (triple_hash_no_name + triple_compare -> same inode AND same_name):
+   `cp a ./a d` matches, hardlink pairs `cp f g d` do not. */
 bool
 chopin_src_seen_or_record(const char *name, const struct stat *sb)
 {
     for (size_t i = 0; i < src_info.len; i++)
         if (src_info.items[i].dev == sb->st_dev
-            && src_info.items[i].ino == sb->st_ino)
+            && src_info.items[i].ino == sb->st_ino
+            && chopin_same_nameat(AT_FDCWD, src_info.items[i].name,
+                                  AT_FDCWD, name) == 1)
             return true;
     table_add(&src_info, name, sb);
     return false;
@@ -75,4 +81,44 @@ void
 chopin_dest_record(const char *relname, const struct stat *sb)
 {
     table_add(&dest_info, relname, sb);
+}
+
+/* --- src_to_dest ---------------------------------------------------- */
+
+static struct table src_to_dest;
+
+const char *
+chopin_src_to_dest_lookup(dev_t dev, ino_t ino)
+{
+    for (size_t i = 0; i < src_to_dest.len; i++)
+        if (src_to_dest.items[i].dev == dev
+            && src_to_dest.items[i].ino == ino)
+            return src_to_dest.items[i].name;
+    return NULL;
+}
+
+const char *
+chopin_remember_copied(const char *dest, dev_t dev, ino_t ino)
+{
+    const char *earlier = chopin_src_to_dest_lookup(dev, ino);
+
+    if (earlier != NULL)
+        return earlier;
+    struct stat key;
+    key.st_dev = dev;
+    key.st_ino = ino;
+    table_add(&src_to_dest, dest, &key);
+    return NULL;
+}
+
+void
+chopin_forget_created(dev_t dev, ino_t ino)
+{
+    for (size_t i = 0; i < src_to_dest.len; i++)
+        if (src_to_dest.items[i].dev == dev
+            && src_to_dest.items[i].ino == ino) {
+            free(src_to_dest.items[i].name);
+            src_to_dest.items[i] = src_to_dest.items[--src_to_dest.len];
+            return;
+        }
 }

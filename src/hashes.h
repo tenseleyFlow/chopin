@@ -20,4 +20,12 @@ bool chopin_src_seen_or_record(const char *name, const struct stat *sb);
 bool chopin_dest_seen(const char *relname, const struct stat *sb);
 void chopin_dest_record(const char *relname, const struct stat *sb);
 
+/* src_to_dest (cp-hash.c): src dev/ino -> first dest name, for
+   hardlink preservation and the cp -R dir dir detector. Always
+   active (GNU hash_init is unconditional). remember_copied returns
+   the EARLIER dest name on a hit, else records and returns NULL. */
+const char *chopin_remember_copied(const char *dest, dev_t dev, ino_t ino);
+const char *chopin_src_to_dest_lookup(dev_t dev, ino_t ino);
+void chopin_forget_created(dev_t dev, ino_t ino);
+
 #endif

@@ -24,4 +24,8 @@ bool chopin_apply_meta_fd(int src_fd, const char *src_name,
 
 mode_t chopin_cached_umask(void);
 
+/* Benign chown-failure test (EPERM/EINVAL/EACCES without
+   privileges); reads errno. */
+bool chopin_chown_failure_ok(void);
+
 #endif
