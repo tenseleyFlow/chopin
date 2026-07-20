@@ -8,7 +8,11 @@ include config.mk
 VERSION := $(shell sed -n 's/^CHOPIN_VERSION="\(.*\)"/\1/p' configure)
 
 SRC = \
-	src/main.c
+	src/main.c \
+	src/options.c \
+	src/plan.c \
+	src/quote.c \
+	src/util.c
 
 OBJ = $(SRC:.c=.o)
 DEP = $(OBJ:.o=.d)
