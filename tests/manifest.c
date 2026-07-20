@@ -280,11 +280,14 @@ emit_entry(const char *root, const char *rel)
     else
         fputs(" -", stdout);
 
-    /* HASH */
+    /* HASH. EACCES is deterministic seed content (permission-trap
+       fixtures both sides share), printed as "!" without failing -
+       the manifest stays total. Other read errors are fatal. */
     if (t == 'f') {
         uint64_t h;
         if (hash_file(full, &h) != 0) {
-            warnp(rel, "read");
+            if (errno != EACCES)
+                warnp(rel, "read");
             fputs(" !", stdout);
         } else {
             printf(" %016" PRIx64, h);

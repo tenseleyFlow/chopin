@@ -210,6 +210,7 @@ run_case() {
     seed="${CASE_SEED:-seed_smoke}"
     mkpair "case-$tag" "$seed"
     cdir="$work/case-$tag"
+    failed_before=$failed
 
     # Pre-create every capture file before either tool runs.
     for f in A.out A.err B.out B.err A.rc B.rc A.man B.man; do
@@ -256,7 +257,9 @@ run_case() {
             > "$cdir/$side.out" 2> "$cdir/$side.err"
         echo $? > "$cdir/$side.rc"
         assert_contained "$sb"
-        "$manifest" ${MANIFEST_FLAGS:-} "$sb/dst" > "$cdir/$side.man" \
+        # Manifest the WHOLE sandbox: destination results and the
+        # proof that sources were not touched.
+        "$manifest" ${MANIFEST_FLAGS:-} "$sb" > "$cdir/$side.man" \
             || fail_case "$tag" "manifest of side $side failed"
     done
 
@@ -291,7 +294,7 @@ run_case() {
         diff "$cdir/A.err.s" "$cdir/B.err.s" | head -10
         ok=0
     fi
-    if [ "$ok" = 1 ]; then
+    if [ "$ok" = 1 ] && [ "$failed_before" = "$failed" ]; then
         passed=$((passed + 1))
         rmtree "$cdir"
     else
@@ -546,6 +549,69 @@ run_case cp-context-warn "--context=ctx warns then copies" ORDERED C 0 \
     -- --context=ctx SRC/a.txt DST/ctx.txt
 run_case cp-debug-skip "-n --debug prints skipped" ORDERED C 0 \
     -- -n --debug SRC/a.txt DST/a.txt
+CASE_SEED=
+
+# --- sprint 03: same-file matrix, backups, dev tier ------------------
+
+seed_backup() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/d"
+    printf 'alpha\n' > "$s/d/a"
+    printf 'old\n' > "$s/d/b"
+    touch -d '2020-01-01 00:00:00' "$s/d/b"
+    ln "$s/d/b" "$s/d/bhard"
+    printf 'v0\n' > "$s/d/n"
+    printf 'v1\n' > "$s/d/n.~1~"
+    printf 'w9\n' > "$s/d/n9"
+    printf 'x9\n' > "$s/d/n9.~9~"
+    touch -d '2020-01-01 00:00:00' "$s/d/n" "$s/d/n.~1~" \
+        "$s/d/n9" "$s/d/n9.~9~"
+    : > "$s/a"
+    printf 'A\n' > "$s/a~"
+    printf 'u\n' > "$s/d/unread"
+    chmod 000 "$s/d/unread"
+}
+
+# Backup cases address the seed's d/ tree with literal relative
+# paths (cwd = sandbox root). VAR=val before a FUNCTION call has
+# unspecified persistence in POSIX sh (family trap) - set/reset
+# explicitly.
+bk() {
+    CASE_SEED=seed_backup
+    run_case "$@"
+    CASE_SEED=
+}
+bk bk-simple "simple backup" ORDERED C 0 -- -b d/a d/b
+bk bk-simple2 "simple backup word" ORDERED C 0 -- --backup=simple d/a d/b
+bk bk-numbered "numbered first backup" ORDERED C 0 \
+    -- --backup=numbered d/a d/b
+bk bk-numbered-next "numbered continues from max" ORDERED C 0 \
+    -- --backup=numbered d/a d/n
+bk bk-existing-numbered "existing picks numbered" ORDERED C 0 \
+    -- -b d/a d/n
+bk bk-existing-simple "existing picks simple" ORDERED C 0 -- -b d/a d/b
+bk bk-all9s "all-9s numbered growth" ORDERED C 0 \
+    -- --backup=numbered d/a d/n9
+bk bk-suffix "explicit -S suffix" ORDERED C 0 -- -b -S .bak d/a d/b
+bk bk-same-same "cp -b f f refused" ORDERED C 1 -- -b d/a d/a
+bk bk-hardlink "cp -b f hardlink-of-f backs up" ORDERED C 0 \
+    -- -b d/b d/bhard
+bk bk-l-noop "cp -l f f silent no-op" ORDERED C 0 -- -l d/a d/a
+bk bk-fb-rewrite "cp -f -b same same dest rewrite" ORDERED C 0 \
+    -- -f -b d/a d/a
+bk bk-unbackup "failed copy restores the backup" ORDERED C 1 \
+    -- -b d/unread d/b
+bk bk-unbackup-v "unbackup verbose line" ORDERED C 1 \
+    -- -bv d/unread d/b
+bk bk-verbose "backup annotation in -v" ORDERED C 0 -- -bv d/a d/b
+bk bk-update-older "backup with update-older copies older dst" \
+    ORDERED C 0 -- -b --update=older d/a d/b
+
+# Dev tier: DEV-001 single-space fix, pinned corrected bytes.
+CASE_SEED=seed_backup
+run_case_dev backup-space "DEV-001 single-space refusal" C \
+    -- --b=simple 'a~' a
 CASE_SEED=
 
 # The unwritable-dir seed leaves a 555 directory; the cleanup trap's
