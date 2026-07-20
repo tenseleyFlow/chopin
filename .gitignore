@@ -1,0 +1,15 @@
+# Local planning and agent files never reach the remote.
+.docs/
+CLAUDE.md
+AGENTS.md
+# Build artifacts.
+*.o
+*.d
+chopin
+cpn
+config.h
+config.mk
+chopin-*.tar.gz
+build/
+tests/.work/
+bench/results/
