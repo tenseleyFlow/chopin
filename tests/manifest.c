@@ -332,9 +332,12 @@ emit_entry(const char *root, const char *rel)
     else
         fputs(" -", stdout);
 
-    /* MTIME (-t) */
+    /* MTIME (-t): files and symlinks only. A directory that RECEIVES
+       an entry gets its mtime bumped to "now", which can never match
+       across twin sandboxes; -pR post-order dir times get their own
+       flag when sprint 06 needs it. */
     if (opt_times) {
-        if (t == 'f' || t == 'd' || t == 'l') {
+        if (t == 'f' || t == 'l') {
 #if CHOPIN_HAVE_ST_MTIM
             printf(" %jd.%09ld", (intmax_t)st.st_mtim.tv_sec,
                    st.st_mtim.tv_nsec);

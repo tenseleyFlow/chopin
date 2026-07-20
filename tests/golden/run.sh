@@ -43,8 +43,15 @@ rm -rf "$work"
 mkdir -p "$work"
 workreal=$(CDPATH= cd -- "$work" && pwd -P)
 
-# Registered containment roots (sprint 05 adds the probed EXDEV root).
+# Registered containment roots. CHOPIN_TEST_FSROOT (the sprint 04D
+# loopback mounts) adds secondary roots; sprint 05's EXDEV cases and
+# sprint 07's reflink goldens run inside them.
 containment_roots="$workreal"
+for fsroot in ${CHOPIN_TEST_FSROOT:-}; do
+    [ -d "$fsroot" ] && [ -w "$fsroot" ] || continue
+    fsr=$(CDPATH= cd -- "$fsroot" && pwd -P) || continue
+    containment_roots="$containment_roots $fsr"
+done
 
 cleanup() {
     chmod -R u+rwx "$work" 2>/dev/null || true
@@ -129,6 +136,7 @@ run_pinned() {
             TZ=UTC0 \
             ${CHOPIN_PARALLEL_MIN:+CHOPIN_PARALLEL_MIN="$CHOPIN_PARALLEL_MIN"} \
             ${CHOPIN_PARALLEL_WORKERS:+CHOPIN_PARALLEL_WORKERS="$CHOPIN_PARALLEL_WORKERS"} \
+            CHOPIN_DEBUG_VERIFY=1 \
             "$rp_tool" "$@"
     )
 }
@@ -630,6 +638,54 @@ mg guard-clobber-numbered "numbered backups bypass the guard" ORDERED C 0 \
     -- --backup=numbered d1/f d2/f dst
 mg guard-dup-backup-off "backups disable the dup-source skip, guard fires" ORDERED C 1 \
     -- -b a ./a dst
+
+# --- sprint 04: metadata engine ---------------------------------------
+
+seed_meta() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/d"
+    printf 'alpha\n' > "$s/s"
+    chmod 750 "$s/s"
+    setfattr -n user.k1 -v v1 "$s/s" 2>/dev/null || true
+    setfattr -n user.k2 -v v2 "$s/s" 2>/dev/null || true
+    printf 'old\n' > "$s/e"
+    chmod 664 "$s/e"
+    printf 'keep\n' > "$s/ao"
+    chmod 600 "$s/ao"
+    touch -d '2021-03-04 05:06:07.123456789' "$s/s"
+    touch -d '2020-01-01 00:00:00' "$s/e" "$s/ao"
+}
+
+meta() {
+    m_flags="$1"; shift
+    CASE_SEED=seed_meta
+    MANIFEST_FLAGS="$m_flags"
+    run_case "$@"
+    CASE_SEED=
+    MANIFEST_FLAGS=
+}
+meta "-t" meta-p-fresh "-p fresh copy" ORDERED C 0 -- -p s d/p1
+meta "-t" meta-p-over "-p over existing" ORDERED C 0 -- -p s e
+meta "-t -x" meta-a-file "-a on a file" ORDERED C 0 -- -a s d/p2
+meta "-t" meta-times "preserve=timestamps only" ORDERED C 0 \
+    -- --preserve=timestamps s d/p3
+meta "" meta-mode "preserve=mode only" ORDERED C 0 \
+    -- --preserve=mode s d/p4
+meta "-x" meta-xattr "preserve=xattr" ORDERED C 0 \
+    -- --preserve=xattr s d/p5
+meta "" meta-nomode "no-preserve=mode fresh" ORDERED C 0 \
+    -- --no-preserve=mode s d/p6
+meta "" meta-umask "bare cp umask mode" ORDERED C 0 -- s d/p7
+meta "-t" meta-attronly "--attributes-only keeps data" ORDERED C 0 \
+    -- --attributes-only -p s ao
+meta "-t" meta-own "preserve ownership same-uid" ORDERED C 0 \
+    -- --preserve=ownership,timestamps s d/p8
+meta "-t -x" meta-a-over "-a xattrs onto existing" ORDERED C 0 -- -a s e
+meta "-t -x" meta-all-word "preserve=all word" ORDERED C 0 \
+    -- --preserve=all s d/p9
+meta "" meta-noall "no-preserve=all" ORDERED C 0 \
+    -- --no-preserve=all s d/p10
 
 # Dev tier: DEV-001 single-space fix, pinned corrected bytes.
 CASE_SEED=seed_backup

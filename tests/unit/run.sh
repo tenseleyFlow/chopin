@@ -62,7 +62,7 @@ fi
 if ! "$cc_bin" -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 $extra \
     -I. -Isrc -Wall -Wextra -Werror -pthread \
     -o build/samefile_driver-unittest tests/unit/samefile_driver.c \
-    src/copy.c src/copydata.c src/backup.c src/hashes.c src/options.c \
+    src/copy.c src/copydata.c src/backup.c src/hashes.c src/meta.c src/options.c \
     src/plan.c src/quote.c src/util.c; then
     bad "samefile_driver does not compile/link"
 else
@@ -169,6 +169,31 @@ else
     cmp -s "$work/m1" "$work/m1b" \
         && note "ok: manifest run is deterministic" \
         || bad "manifest nondeterministic across runs"
+fi
+
+# --- Metadata order pin (sprint 04A): utimensat before fchown before
+# fsetxattr before fchmod under -a. strace is Linux-lane-only; clean
+# skip elsewhere (sprint 04 scoping rule).
+if command -v strace >/dev/null 2>&1 && command -v setfattr >/dev/null 2>&1; then
+    mw=$(mktemp -d "${TMPDIR:-/tmp}/chopin-order.XXXXXX")
+    printf 'x\n' > "$mw/s"; chmod 750 "$mw/s"
+    setfattr -n user.o -v v "$mw/s" 2>/dev/null || true
+    if strace -f -e trace=utimensat,fchown,fsetxattr,fchmod \
+        -o "$mw/tr" ./chopin -a "$mw/s" "$mw/dcopy" 2>/dev/null; then
+        seq=$(grep -oE '(utimensat|fchown|fsetxattr|fchmod)\(' "$mw/tr" \
+            | tr -d '(' | uniq | tr '\n' ' ')
+        case "$seq" in
+        *"utimensat fchown fsetxattr fchmod"*)
+            note "ok: metadata order strace-pinned ($seq)" ;;
+        *)
+            bad "metadata syscall order wrong: $seq" ;;
+        esac
+    else
+        note "skip: strace run failed (ptrace blocked?)"
+    fi
+    rm -rf "$mw"
+else
+    note "skip: metadata order pin (no strace/setfattr on this lane)"
 fi
 
 if [ "$fail" -ne 0 ]; then
