@@ -15,4 +15,15 @@ bool chopin_copy(const char *src_name, const char *dst_name,
                  int nonexistent_dst, const struct chopin_options *x,
                  bool *copy_into_self);
 
+#include <sys/stat.h>
+
+/* Exported for the unit matrix driver (gnu-cp-analysis.md 2.3). */
+bool chopin_same_file_ok(const char *src_name, const struct stat *src_sb,
+                         int dst_dirfd, const char *dst_relname,
+                         const struct stat *dst_sb,
+                         const struct chopin_options *x,
+                         bool *return_now, bool *diagnosed);
+int chopin_same_nameat(int dirfd_a, const char *a,
+                       int dirfd_b, const char *b);
+
 #endif

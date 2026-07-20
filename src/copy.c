@@ -8,10 +8,31 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "backup.h"
 #include "config.h"
 #include "copydata.h"
 #include "quote.h"
 #include "util.h"
+
+static const char *
+last_component_of(const char *name)
+{
+    const char *base = name;
+    const char *p;
+    bool last_was_slash = false;
+
+    while (*base == '/')
+        base++;
+    for (p = base; *p; p++) {
+        if (*p == '/')
+            last_was_slash = true;
+        else if (last_was_slash) {
+            base = p;
+            last_was_slash = false;
+        }
+    }
+    return base;
+}
 
 /* Sprint 02: copy_internal (2.1 items 1-8, 15) + copy_reg (2.4) for
    the regular-file command-line path with the scalar engine. Backup
@@ -41,6 +62,216 @@ yesno(void)
 
     free(line);
     return yes;
+}
+
+/* lib/same.c same_nameat: same basename AND same parent dir inode.
+   Returns 1 same, 0 different, -1 = parent stat failed. GNU calls
+   error(1,...) and aborts the whole run on that failure (quirk 21);
+   chopin diagnoses `cannot stat %s` and fails only this file
+   (DEV-004). */
+int
+chopin_same_nameat(int dirfd_a, const char *a, int dirfd_b, const char *b)
+{
+    const char *base_a = last_component_of(a);
+    const char *base_b = last_component_of(b);
+
+    if (strcmp(base_a, base_b) != 0)
+        return 0;
+
+    char dira[4096];
+    char dirb[4096];
+    size_t la = (size_t)(base_a - a);
+    size_t lb = (size_t)(base_b - b);
+    struct stat sa, sb2;
+
+    if (la == 0)
+        strcpy(dira, ".");
+    else {
+        memcpy(dira, a, la < sizeof dira ? la : sizeof dira - 1);
+        dira[la < sizeof dira ? la : sizeof dira - 1] = '\0';
+    }
+    if (lb == 0)
+        strcpy(dirb, ".");
+    else {
+        memcpy(dirb, b, lb < sizeof dirb ? lb : sizeof dirb - 1);
+        dirb[lb < sizeof dirb ? lb : sizeof dirb - 1] = '\0';
+    }
+    if (fstatat(dirfd_a, dira, &sa, 0) != 0) {
+        chopin_error(errno, "cannot stat %s", chopin_quoteaf(dira));
+        return -1;
+    }
+    if (fstatat(dirfd_b, dirb, &sb2, 0) != 0) {
+        chopin_error(errno, "cannot stat %s", chopin_quoteaf(dirb));
+        return -1;
+    }
+    return SAME_INODE(sa, sb2) ? 1 : 0;
+}
+
+/* copy.c:1163-1399 ported structurally; *diagnosed set when
+   same_nameat already reported a failure (DEV-004: the caller fails
+   the file without the same-file message). move_mode arms retained
+   as engine seams (always false in cp). */
+bool
+chopin_same_file_ok(const char *src_name, const struct stat *src_sb,
+                    int dst_dirfd, const char *dst_relname,
+                    const struct stat *dst_sb,
+                    const struct chopin_options *x,
+                    bool *return_now, bool *diagnosed)
+{
+    const struct stat *src_sb_link;
+    const struct stat *dst_sb_link;
+    struct stat tmp_dst_sb;
+    struct stat tmp_src_sb;
+    bool same_link;
+    bool same = SAME_INODE(*src_sb, *dst_sb);
+    int sn;
+
+    *return_now = false;
+    *diagnosed = false;
+
+    if (same && x->hard_link) {
+        *return_now = true;
+        return true;
+    }
+
+    if (x->dereference == CHOPIN_DEREF_NEVER) {
+        same_link = same;
+
+        if (S_ISLNK(src_sb->st_mode) && S_ISLNK(dst_sb->st_mode)) {
+            sn = chopin_same_nameat(AT_FDCWD, src_name,
+                                    dst_dirfd, dst_relname);
+            if (sn < 0) {
+                *diagnosed = true;
+                return false;
+            }
+            if (!sn) {
+                if (x->backup_type != CHOPIN_BACKUP_NONE)
+                    return true;
+                if (same_link) {
+                    *return_now = true;
+                    return !x->move_mode;
+                }
+            }
+            return !sn;
+        }
+        src_sb_link = src_sb;
+        dst_sb_link = dst_sb;
+    } else {
+        if (!same)
+            return true;
+
+        if (fstatat(dst_dirfd, dst_relname, &tmp_dst_sb,
+                    AT_SYMLINK_NOFOLLOW) != 0
+            || lstat(src_name, &tmp_src_sb) != 0)
+            return true;
+
+        src_sb_link = &tmp_src_sb;
+        dst_sb_link = &tmp_dst_sb;
+
+        same_link = SAME_INODE(*src_sb_link, *dst_sb_link);
+
+        if (S_ISLNK(src_sb_link->st_mode) && S_ISLNK(dst_sb_link->st_mode)
+            && x->unlink_dest_before_opening)
+            return true;
+    }
+
+    if (x->backup_type != CHOPIN_BACKUP_NONE) {
+        if (!same_link) {
+            /* Backing up dst would dangle a dereferenced symlink
+               source. */
+            if (!x->move_mode
+                && x->dereference != CHOPIN_DEREF_NEVER
+                && S_ISLNK(src_sb_link->st_mode)
+                && !S_ISLNK(dst_sb_link->st_mode))
+                return false;
+            return true;
+        }
+        sn = chopin_same_nameat(AT_FDCWD, src_name, dst_dirfd, dst_relname);
+        if (sn < 0) {
+            *diagnosed = true;
+            return false;
+        }
+        return !sn;
+    }
+
+    if (x->move_mode || x->unlink_dest_before_opening) {
+        if (S_ISLNK(dst_sb_link->st_mode))
+            return true;
+        if (same_link && 1 < dst_sb_link->st_nlink) {
+            sn = chopin_same_nameat(AT_FDCWD, src_name,
+                                    dst_dirfd, dst_relname);
+            if (sn < 0) {
+                *diagnosed = true;
+                return false;
+            }
+            if (!sn)
+                return !x->move_mode;
+        }
+    }
+
+    if (!S_ISLNK(src_sb_link->st_mode) && !S_ISLNK(dst_sb_link->st_mode)) {
+        if (!SAME_INODE(*src_sb_link, *dst_sb_link))
+            return true;
+        if (x->hard_link) {
+            *return_now = true;
+            return true;
+        }
+    }
+
+    /* mv-only symlink-onto-referent case (engine seam; move_mode is
+       never true in cp). */
+
+    if (x->symbolic_link && S_ISLNK(dst_sb_link->st_mode))
+        return true;
+
+    if (x->dereference == CHOPIN_DEREF_NEVER) {
+        if (!S_ISLNK(src_sb_link->st_mode))
+            tmp_src_sb = *src_sb_link;
+        else if (stat(src_name, &tmp_src_sb) != 0)
+            return true;
+
+        if (!S_ISLNK(dst_sb_link->st_mode))
+            tmp_dst_sb = *dst_sb_link;
+        else if (fstatat(dst_dirfd, dst_relname, &tmp_dst_sb, 0) != 0)
+            return true;
+
+        if (!SAME_INODE(tmp_src_sb, tmp_dst_sb))
+            return true;
+
+        if (x->hard_link) {
+            *return_now = !S_ISLNK(dst_sb_link->st_mode);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/* copy.c:1586-1605: refuse a backup that would rename the source
+   itself (simple/existing suffix collision). */
+static bool
+source_is_dst_backup(const char *srcbase, const struct stat *src_st,
+                     int dst_dirfd, const char *dst_relname)
+{
+    size_t srcbaselen = strlen(srcbase);
+    const char *dstbase = last_component_of(dst_relname);
+    size_t dstbaselen = strlen(dstbase);
+    const char *suffix = chopin_simple_backup_suffix();
+    size_t suffixlen = strlen(suffix);
+
+    if (!(srcbaselen == dstbaselen + suffixlen
+          && memcmp(srcbase, dstbase, dstbaselen) == 0
+          && strcmp(srcbase + dstbaselen, suffix) == 0))
+        return false;
+
+    char *dst_back = chopin_xmalloc(strlen(dst_relname) + suffixlen + 1);
+    struct stat dst_back_sb;
+    int st;
+
+    sprintf(dst_back, "%s%s", dst_relname, suffix);
+    st = fstatat(dst_dirfd, dst_back, &dst_back_sb, 0);
+    free(dst_back);
+    return st == 0 && SAME_INODE(*src_st, dst_back_sb);
 }
 
 /* copy.c:1400-1410. */
@@ -309,19 +540,26 @@ chopin_copy(const char *src_name, const char *dst_name,
         }
     }
 
+    char *dst_backup = NULL;
+
     /* Item 6: existing-dst decision ladder. */
     if (have_dst_sb) {
-        /* same_file_ok: the 10-case matrix is sprint 03. The stub
-           detects plain identity - GNU refuses, and an
-           always-different stub would let `cp a a` truncate a
-           (sprint 02 Amendment). */
         if (x->update != CHOPIN_UPDATE_NONE
-            && x->update != CHOPIN_UPDATE_NONE_FAIL
-            && SAME_INODE(src_sb, dst_sb)) {
-            chopin_error(0, "%s and %s are the same file",
-                         chopin_quoteaf_n(0, src_name),
-                         chopin_quoteaf_n(1, dst_name));
-            return false;
+            && x->update != CHOPIN_UPDATE_NONE_FAIL) {
+            bool return_now = false;
+            bool diagnosed = false;
+
+            if (!chopin_same_file_ok(src_name, &src_sb, dst_dirfd,
+                                     dst_relname, &dst_sb, x,
+                                     &return_now, &diagnosed)) {
+                if (!diagnosed)
+                    chopin_error(0, "%s and %s are the same file",
+                                 chopin_quoteaf_n(0, src_name),
+                                 chopin_quoteaf_n(1, dst_name));
+                return false;
+            }
+            if (return_now)
+                return true;
         }
 
         /* --update=older: nanosecond mtime compare. GNU truncates the
@@ -369,13 +607,40 @@ chopin_copy(const char *src_name, const char *dst_name,
             return false;
         }
 
-        /* dest_info clobber guard: sprint 03. Backup block: sprint 03
-           (a -b invocation over an existing dst cannot proceed
-           honestly yet). */
+        /* dest_info clobber guard: lands with the >=2-source tables
+           (03C). Backup block per copy.c:1912-1965. */
+        const char *srcbase;
         if (x->backup_type != CHOPIN_BACKUP_NONE
-            && !S_ISDIR(dst_sb.st_mode)) {
-            chopin_error(0, "internal: backups arrive in sprint 03");
-            return false;
+            && !(strcmp(srcbase = last_component_of(src_name), ".") == 0
+                 || strcmp(srcbase, "..") == 0)
+            && (x->move_mode || !S_ISDIR(dst_sb.st_mode))) {
+            if (x->backup_type != CHOPIN_BACKUP_NUMBERED
+                && source_is_dst_backup(srcbase, &src_sb, dst_dirfd,
+                                        dst_relname)) {
+                /* DEV-001: GNU prints two spaces after the semicolon
+                   (copy.c:1934-1935); chopin prints one. */
+                chopin_error(0, "backing up %s might destroy source; "
+                                "%s not copied",
+                             chopin_quoteaf_n(0, dst_name),
+                             chopin_quoteaf_n(1, src_name));
+                return false;
+            }
+            char *tmp_backup = chopin_backup_file_rename(dst_dirfd,
+                                                         dst_relname,
+                                                         x->backup_type);
+            if (tmp_backup) {
+                /* Splice under the dest dir prefix for diagnostics. */
+                size_t dirlen = strlen(dst_name) - strlen(dst_relname);
+                dst_backup = chopin_xmalloc(dirlen + strlen(tmp_backup) + 1);
+                memcpy(dst_backup, dst_name, dirlen);
+                strcpy(dst_backup + dirlen, tmp_backup);
+                free(tmp_backup);
+            } else if (errno != ENOENT) {
+                chopin_error(errno, "cannot backup %s",
+                             chopin_quoteaf(dst_name));
+                return false;
+            }
+            new_dst = true;
         }
 
         /* Unlink-before (2.1 item 6 tail; the preserve_links and
@@ -392,42 +657,60 @@ chopin_copy(const char *src_name, const char *dst_name,
         }
     }
 
-    /* Item 7: just-created-symlink guard - sprint 03 (dest_info). */
+    /* Item 7: just-created-symlink guard - 03C (dest_info). */
 
-    /* Item 8: -v prints BEFORE copying (quirk 6). */
-    if (x->verbose && !S_ISDIR(src_sb.st_mode))
-        printf("%s -> %s\n", chopin_quoteaf_n(0, src_name),
+    /* Item 8: -v prints BEFORE copying (quirk 6), with the backup
+       annotation (emit_verbose, copy.c:1506-1514). */
+    if (x->verbose && !S_ISDIR(src_sb.st_mode)) {
+        printf("%s -> %s", chopin_quoteaf_n(0, src_name),
                chopin_quoteaf_n(1, dst_name));
+        if (dst_backup)
+            printf(" (backup: %s)", chopin_quoteaf(dst_backup));
+        putchar('\n');
+    }
+
+    bool ok = true;
 
     /* Items 9-11: hard-link bookkeeping and earlier-file hits are
        sprints 05/06; -l/-s dispatch is sprint 05. */
     if (x->hard_link || x->symbolic_link) {
         chopin_error(0, "internal: -l/-s dispatch arrives in sprint 05");
-        return false;
-    }
-    if (S_ISLNK(src_sb.st_mode)) {
+        ok = false;
+    } else if (S_ISLNK(src_sb.st_mode)) {
         chopin_error(0, "internal: symlink copying arrives in sprint 05");
-        return false;
-    }
+        ok = false;
+    } else if (S_ISREG(src_sb.st_mode)
+               || (x->copy_as_regular && !S_ISLNK(src_sb.st_mode))) {
+        /* Item 12: omitted_permissions - zero for regular files
+           without preserve_ownership (sprint 04 completes the
+           matrix). Item 14: regular dispatch (or copy_as_regular:
+           special files read as data without -R, quirk 13). */
+        mode_t dst_mode_bits = src_sb.st_mode & 07777;
 
-    /* Item 12: omitted_permissions - zero for regular files without
-       preserve_ownership (sprint 04 completes the matrix). */
-    mode_t dst_mode_bits = src_sb.st_mode & 07777;
-
-    /* Item 14: type dispatch - regular (or copy_as_regular: special
-       files read as data without -R, quirk 13). */
-    if (S_ISREG(src_sb.st_mode)
-        || (x->copy_as_regular && !S_ISLNK(src_sb.st_mode))) {
-        if (!copy_reg(src_name, dst_name, dst_dirfd, dst_relname, x,
-                      dst_mode_bits, &new_dst, &src_sb))
-            return false;
+        ok = copy_reg(src_name, dst_name, dst_dirfd, dst_relname, x,
+                      dst_mode_bits, &new_dst, &src_sb);
     } else {
         chopin_error(0, "internal: special-file dispatch arrives in "
                         "sprint 06");
-        return false;
+        ok = false;
     }
 
-    /* Item 15: dest_info recording - sprint 03. Metadata tail -
-       sprint 04. */
-    return true;
+    /* Item 16 (un_backup, copy.c:2747-2773): a failed copy restores
+       the backup over the dest. */
+    if (!ok && dst_backup) {
+        const char *relbackup = dst_backup
+            + (strlen(dst_name) - strlen(dst_relname));
+        if (renameat(dst_dirfd, relbackup, dst_dirfd, dst_relname) != 0) {
+            chopin_error(errno, "cannot un-backup %s",
+                         chopin_quoteaf(dst_name));
+        } else if (x->verbose) {
+            printf("%s -> %s (unbackup)\n",
+                   chopin_quoteaf_n(0, dst_backup),
+                   chopin_quoteaf_n(1, dst_name));
+        }
+    }
+    free(dst_backup);
+
+    /* Item 15: dest_info recording - 03C. Metadata tail - sprint 04. */
+    return ok;
 }

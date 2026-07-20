@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "backup.h"
 #include "copy.h"
 #include "options.h"
 #include "plan.h"
@@ -327,12 +328,21 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
                 printf("samefile_backup_rewrite=1\n");
         } else {
             bool into_self;
+            struct chopin_options x_local;
+            const struct chopin_options *xp = &inv->x;
 
-            /* samefile_rewrite consumes find_backup_file_name
-               (sprint 03); until then the backup block inside the
-               spine refuses such invocations honestly. */
+            if (samefile_rewrite) {
+                /* cp.c:848-873: dest becomes the backup name and
+                   backup_type clears for the actual copy - the name
+                   must be generated BEFORE clearing. */
+                dest = chopin_find_backup_name(AT_FDCWD, dest,
+                                               inv->x.backup_type);
+                x_local = inv->x;
+                x_local.backup_type = CHOPIN_BACKUP_NONE;
+                xp = &x_local;
+            }
             ok = chopin_copy(source, dest, AT_FDCWD, dest, -new_dst,
-                             &inv->x, &into_self);
+                             xp, &into_self);
         }
         finish(inv, debug_options, new_dst, ok);
     }
