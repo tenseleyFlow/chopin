@@ -69,9 +69,11 @@ golden: all build/manifest
 fuzz-smoke: all
 	@test ! -f tests/fuzz/run.sh || FUZZ_TRIALS=25 sh tests/fuzz/run.sh || test $$? -eq 77
 
+# Release depth: 3 seeds x 200 trials (sprint 08).
 fuzz: all
-	@test -f tests/fuzz/run.sh || { echo "fuzz harness lands in sprint 08"; exit 1; }
-	sh tests/fuzz/run.sh
+	FUZZ_TRIALS=200 FUZZ_SEED=42 sh tests/fuzz/run.sh
+	FUZZ_TRIALS=200 FUZZ_SEED=7 sh tests/fuzz/run.sh
+	FUZZ_TRIALS=200 FUZZ_SEED=1234 sh tests/fuzz/run.sh
 
 perf-smoke: all
 	@test ! -f bench/run-smoke.sh || sh bench/run-smoke.sh || test $$? -eq 77
