@@ -100,6 +100,10 @@ get_buffer(size_t want)
 #include <sys/clonefile.h>
 #endif
 
+static unsigned long clone_probes;
+static unsigned long cache_hits;
+
+#if CHOPIN_HAVE_FICLONE
 struct dev_pair {
     dev_t src;
     dev_t dst;
@@ -107,8 +111,6 @@ struct dev_pair {
 static struct dev_pair *failed_pairs;
 static size_t n_failed;
 static size_t cap_failed;
-static unsigned long clone_probes;
-static unsigned long cache_hits;
 
 static bool
 pair_failed(dev_t src, dev_t dst)
@@ -132,6 +134,7 @@ remember_failed_pair(dev_t src, dev_t dst)
     failed_pairs[n_failed].dst = dst;
     n_failed++;
 }
+#endif
 
 static void
 stats_atexit(void)
