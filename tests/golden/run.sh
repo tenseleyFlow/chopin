@@ -608,6 +608,29 @@ bk bk-verbose "backup annotation in -v" ORDERED C 0 -- -bv d/a d/b
 bk bk-update-older "backup with update-older copies older dst" \
     ORDERED C 0 -- -b --update=older d/a d/b
 
+# >=2-source guard tables (2.7).
+seed_multi() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/d1" "$s/d2" "$s/dst"
+    printf 'one\n' > "$s/d1/f"
+    printf 'two\n' > "$s/d2/f"
+    printf 'a\n' > "$s/a"
+}
+mg() {
+    CASE_SEED=seed_multi
+    run_case "$@"
+    CASE_SEED=
+}
+mg guard-dup-source "duplicate source warns, succeeds" ORDERED C 0 \
+    -- a ./a dst
+mg guard-clobber "will not overwrite just-created" ORDERED C 1 \
+    -- d1/f d2/f dst
+mg guard-clobber-numbered "numbered backups bypass the guard" ORDERED C 0 \
+    -- --backup=numbered d1/f d2/f dst
+mg guard-dup-backup-off "backups disable the dup-source skip, guard fires" ORDERED C 1 \
+    -- -b a ./a dst
+
 # Dev tier: DEV-001 single-space fix, pinned corrected bytes.
 CASE_SEED=seed_backup
 run_case_dev backup-space "DEV-001 single-space refusal" C \
