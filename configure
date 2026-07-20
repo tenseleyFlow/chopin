@@ -1,0 +1,206 @@
+#!/bin/sh
+# Hand-written configure for chopin. Writes config.h and config.mk.
+# No autotools. Idempotent. Honors CC.
+
+set -e
+
+CHOPIN_VERSION="0.0.1"
+
+cc="${CC:-cc}"
+mkdir -p build
+
+# Platform feature macros. _DEFAULT_SOURCE is always in CPPFLAGS (Makefile);
+# Linux additionally needs _GNU_SOURCE for statx/getdents64/copy_file_range/
+# syscall under strict C11 (ferret's lesson).
+extra_cppflags=""
+case "$(uname -s)" in
+Linux) extra_cppflags="-D_GNU_SOURCE" ;;
+Darwin) extra_cppflags="-D_DARWIN_C_SOURCE" ;;
+esac
+
+try_compile() {
+    name="$1"
+    code="$2"
+    printf '%s\n' "$code" > "build/probe_$name.c"
+    if "$cc" -std=c11 -D_DEFAULT_SOURCE $extra_cppflags -Wall -Werror \
+        -c -o "build/probe_$name.o" "build/probe_$name.c" 2>/dev/null; then
+        rm -f "build/probe_$name.c" "build/probe_$name.o"
+        return 0
+    fi
+    rm -f "build/probe_$name.c" "build/probe_$name.o"
+    return 1
+}
+
+have_statx=0
+try_compile statx '
+#include <sys/stat.h>
+#include <fcntl.h>
+int probe(void);
+int probe(void) { struct statx sx; return statx(AT_FDCWD, ".", 0, STATX_BASIC_STATS, &sx); }
+' && have_statx=1
+
+have_getdents64=0
+try_compile getdents64 '
+#include <sys/syscall.h>
+#include <unistd.h>
+long probe(void);
+long probe(void) { char buf[64]; return syscall(SYS_getdents64, 0, buf, sizeof buf); }
+' && have_getdents64=1
+
+have_getdirentries=0
+try_compile getdirentries '
+#include <dirent.h>
+#include <sys/types.h>
+long probe(void);
+long probe(void) { char buf[64]; off_t base = 0; return getdirentries(0, buf, sizeof buf, &base); }
+' && have_getdirentries=1
+
+have_d_type=0
+try_compile d_type '
+#include <dirent.h>
+int probe(void);
+int probe(void) { struct dirent d; d.d_type = DT_REG; return d.d_type == DT_REG; }
+' && have_d_type=1
+
+have_copy_file_range=0
+try_compile copy_file_range '
+#include <unistd.h>
+long probe(void);
+long probe(void) { return copy_file_range(0, (void *)0, 1, (void *)0, 0, 0); }
+' && have_copy_file_range=1
+
+have_ficlone=0
+try_compile ficlone '
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+int probe(void);
+int probe(void) { return ioctl(1, FICLONE, 0); }
+' && have_ficlone=1
+
+# Darwin reflink path (gnu-cp-analysis.md 2.4 item 5 is Linux-inert;
+# chopin mac builds clone via fclonefileat - sprint 07B).
+have_fclonefileat=0
+try_compile fclonefileat '
+#include <sys/attr.h>
+#include <sys/clonefile.h>
+#include <fcntl.h>
+int probe(void);
+int probe(void) { return fclonefileat(0, AT_FDCWD, "x", CLONE_NOFOLLOW); }
+' && have_fclonefileat=1
+
+have_seek_hole=0
+try_compile seek_hole '
+#include <unistd.h>
+#include <fcntl.h>
+long probe(void);
+long probe(void) { return lseek(0, 0, SEEK_HOLE) + lseek(0, 0, SEEK_DATA); }
+' && have_seek_hole=1
+
+have_fallocate_punch=0
+try_compile fallocate_punch '
+#include <fcntl.h>
+#include <linux/falloc.h>
+int probe(void);
+int probe(void) { return fallocate(0, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 1); }
+' && have_fallocate_punch=1
+
+# Numbered-backup race loop wants an atomic no-replace rename
+# (overview s4 backup.c; Linux renameat2, Darwin renameatx_np).
+have_renameat2=0
+try_compile renameat2 '
+#include <stdio.h>
+#include <fcntl.h>
+int probe(void);
+int probe(void) { return renameat2(AT_FDCWD, "a", AT_FDCWD, "b", RENAME_NOREPLACE); }
+' && have_renameat2=1
+
+have_renameatx_np=0
+try_compile renameatx_np '
+#include <stdio.h>
+#include <fcntl.h>
+int probe(void);
+int probe(void) { return renameatx_np(AT_FDCWD, "a", AT_FDCWD, "b", RENAME_EXCL); }
+' && have_renameatx_np=1
+
+# Linux xattr signature: getxattr(path, name, value, size).
+have_getxattr=0
+try_compile getxattr '
+#include <sys/xattr.h>
+long probe(void);
+long probe(void) { return getxattr(".", "user.x", (void *)0, 0); }
+' && have_getxattr=1
+
+# Darwin xattr signature has options/position parameters.
+have_getxattr_darwin=0
+try_compile getxattr_darwin '
+#include <sys/xattr.h>
+long probe(void);
+long probe(void) { return getxattr(".", "user.x", (void *)0, 0, 0, 0); }
+' && have_getxattr_darwin=1
+
+# FreeBSD extended attributes.
+have_extattr=0
+try_compile extattr '
+#include <sys/types.h>
+#include <sys/extattr.h>
+long probe(void);
+long probe(void) { return extattr_get_file(".", EXTATTR_NAMESPACE_USER, "x", (void *)0, 0); }
+' && have_extattr=1
+
+have_st_mtim=0
+try_compile st_mtim '
+#include <sys/stat.h>
+long probe(void);
+long probe(void) { struct stat st = {0}; return (long)st.st_mtim.tv_nsec; }
+' && have_st_mtim=1
+
+have_st_mtimespec=0
+try_compile st_mtimespec '
+#include <sys/stat.h>
+long probe(void);
+long probe(void) { struct stat st = {0}; return (long)st.st_mtimespec.tv_nsec; }
+' && have_st_mtimespec=1
+
+case "$(uname -m)" in
+x86_64|amd64|aarch64|arm64) endian=little ;;
+*) endian=unknown ;;
+esac
+
+cat > config.h <<EOF
+#ifndef CHOPIN_CONFIG_H
+#define CHOPIN_CONFIG_H
+#define CHOPIN_VERSION "$CHOPIN_VERSION"
+#define CHOPIN_HAVE_STATX $have_statx
+#define CHOPIN_HAVE_GETDENTS64 $have_getdents64
+#define CHOPIN_HAVE_GETDIRENTRIES $have_getdirentries
+#define CHOPIN_HAVE_D_TYPE $have_d_type
+#define CHOPIN_HAVE_COPY_FILE_RANGE $have_copy_file_range
+#define CHOPIN_HAVE_FICLONE $have_ficlone
+#define CHOPIN_HAVE_FCLONEFILEAT $have_fclonefileat
+#define CHOPIN_HAVE_SEEK_HOLE $have_seek_hole
+#define CHOPIN_HAVE_FALLOCATE_PUNCH $have_fallocate_punch
+#define CHOPIN_HAVE_RENAMEAT2 $have_renameat2
+#define CHOPIN_HAVE_RENAMEATX_NP $have_renameatx_np
+#define CHOPIN_HAVE_GETXATTR $have_getxattr
+#define CHOPIN_HAVE_GETXATTR_DARWIN $have_getxattr_darwin
+#define CHOPIN_HAVE_EXTATTR $have_extattr
+#define CHOPIN_HAVE_ST_MTIM $have_st_mtim
+#define CHOPIN_HAVE_ST_MTIMESPEC $have_st_mtimespec
+#define CHOPIN_ENDIAN_$endian 1
+#endif
+EOF
+
+cat > config.mk <<EOF
+CC ?= $cc
+EXTRA_CPPFLAGS = $extra_cppflags
+SANITIZE_FLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
+LDLIBS ?=
+EOF
+
+echo "chopin $CHOPIN_VERSION configured:"
+echo "  cc=$cc"
+echo "  statx=$have_statx getdents64=$have_getdents64 getdirentries=$have_getdirentries d_type=$have_d_type"
+echo "  copy_file_range=$have_copy_file_range ficlone=$have_ficlone fclonefileat=$have_fclonefileat"
+echo "  seek_hole=$have_seek_hole fallocate_punch=$have_fallocate_punch renameat2=$have_renameat2 renameatx_np=$have_renameatx_np"
+echo "  getxattr=$have_getxattr getxattr_darwin=$have_getxattr_darwin extattr=$have_extattr"
+echo "  st_mtim=$have_st_mtim st_mtimespec=$have_st_mtimespec endian=$endian"
