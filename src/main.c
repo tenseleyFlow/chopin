@@ -18,10 +18,31 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "copy.h"
 #include "options.h"
 #include "plan.h"
 #include "quote.h"
 #include "util.h"
+
+/* gnulib close_stdout semantics (cp registers it atexit): a stdout
+   write failure surfaces as `write error` and forces exit 1 even
+   after a successful copy (gnu-cp-analysis.md 4.1). */
+static void
+close_stdout_atexit(void)
+{
+    bool prev_fail = ferror(stdout) != 0;
+    int e = 0;
+
+    if (fflush(stdout) != 0)
+        e = errno;
+    if (prev_fail || e != 0) {
+        if (e != 0)
+            chopin_error(e, "write error");
+        else
+            chopin_error(0, "write error");
+        _exit(CHOPIN_STATUS_FAIL);
+    }
+}
 
 #ifdef O_PATH
 #define CHOPIN_O_PATHSEARCH O_PATH
@@ -156,7 +177,8 @@ record_pair(const char *src, const char *dst)
 }
 
 static _Noreturn void
-finish(const struct chopin_invocation *inv, bool debug_options, bool new_dst)
+finish(const struct chopin_invocation *inv, bool debug_options,
+       bool new_dst, bool ok)
 {
     struct chopin_plan plan;
 
@@ -169,9 +191,7 @@ finish(const struct chopin_invocation *inv, bool debug_options, bool new_dst)
             printf("map %s => %s\n", pairs[i].src, pairs[i].dst);
         exit(CHOPIN_STATUS_OK);
     }
-    fprintf(stderr, "%s: copying is not implemented yet (sprint 01)\n",
-            chopin_prog);
-    exit(CHOPIN_STATUS_FAIL);
+    exit(ok ? CHOPIN_STATUS_OK : CHOPIN_STATUS_FAIL);
 }
 
 /* do_copy front half per cp.c:669-880. */
@@ -235,6 +255,8 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
         }
     }
 
+    bool ok = true;
+
     if (target_directory) {
         /* dest_info_init/src_info_init for 2 <= n_files: sprint 03. */
         for (int i = 0; i < n_files; i++) {
@@ -264,10 +286,20 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
                                             &arg_in_concat);
                 free(arg_base);
             }
-            record_pair(arg, dst_name);
+            if (debug_options) {
+                record_pair(arg, dst_name);
+            } else {
+                const char *rel = arg_in_concat;
+                bool into_self;
+
+                while (*rel == '/')
+                    rel++;
+                ok &= chopin_copy(arg, dst_name, target_dirfd, rel, 0,
+                                  &inv->x, &into_self);
+            }
             free(dst_name);
         }
-        finish(inv, debug_options, new_dst);
+        finish(inv, debug_options, new_dst, ok);
     } else {
         if (inv->parents_option) {
             chopin_error(0, "with --parents, the destination must be a "
@@ -289,10 +321,20 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
             && (sb.st_mode != 0 || stat(dest, &sb) == 0)
             && S_ISREG(sb.st_mode);
 
-        record_pair(source, dest);
-        if (samefile_rewrite && debug_options)
-            printf("samefile_backup_rewrite=1\n");
-        finish(inv, debug_options, new_dst);
+        if (debug_options) {
+            record_pair(source, dest);
+            if (samefile_rewrite)
+                printf("samefile_backup_rewrite=1\n");
+        } else {
+            bool into_self;
+
+            /* samefile_rewrite consumes find_backup_file_name
+               (sprint 03); until then the backup block inside the
+               spine refuses such invocations honestly. */
+            ok = chopin_copy(source, dest, AT_FDCWD, dest, -new_dst,
+                             &inv->x, &into_self);
+        }
+        finish(inv, debug_options, new_dst, ok);
     }
 }
 
@@ -304,6 +346,7 @@ main(int argc, char **argv)
     setlocale(LC_ALL, "");
     chopin_set_program(argc > 0 && argv[0] ? argv[0] : "chopin");
     chopin_diag_init();
+    atexit(close_stdout_atexit);
 
     chopin_parse_args(argc, argv, &inv);
     chopin_options_resolve(&inv);
