@@ -25,5 +25,19 @@ returns_() {
 
 Exit() { exit "$1"; }
 
+# init.sh retry_delay_: call TESTFUNC with a delay argument, doubling
+# up to MAXTRIES attempts (time-sensitive tests). TESTFUNC returns 0
+# when the probe succeeded.
+retry_delay_() {
+    rd_fn="$1"; rd_delay="$2"; rd_tries="$3"
+    rd_i=0
+    while :; do
+        "$rd_fn" "$rd_delay" && return 0
+        rd_i=$((rd_i + 1))
+        [ "$rd_i" -ge "$rd_tries" ] && return 1
+        rd_delay=$(awk "BEGIN{print $rd_delay*2}")
+    done
+}
+
 # Diagnostics channel some scripts write to.
 exec 9>&2

@@ -28,7 +28,10 @@ UNQUOTED in the symlink-ownership failure path (copy.c:2579-2580),
 inconsistent with every neighboring diagnostic (quirk register 3).
 chopin quotes it.
 Upstream: draft ready.
-Pinned by: dev-tier case (sprint 05).
+Pinned by: code site (src/copy.c symlink branch). The failure needs
+lchownat to fail with a non-benign errno, which requires privileges
+(chown_failure_ok silences the unprivileged EPERM) - unreachable in
+the root-refusing harness; the fuzz tier cannot draw it either.
 
 ## DEV-003 --update=older identical-symlink success [QUIRK-KEPT v0.1]
 

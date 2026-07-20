@@ -44,12 +44,17 @@ mkdir -p "$work"
 trap 'chmod -R u+rwx "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
 # Mined set (sandbox-safe, no root/SELinux/mv, no -R yet).
-scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl"
+scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl link-deref link-no-deref deref-slink preserve-slink-time cp-HL link-heap cross-dev-symlink"
 
 # script -> sprint whose machinery it waits for (DEFER, not failure).
 deferred_until() {
     case "$1" in
     preserve-mode) echo "06" ;;   # uses cp -r mid-script
+    link-heap) echo "06" ;;       # ulimit -v + deep -R trees
+    cp-HL) echo "06" ;;           # -R directory halves
+    link-deref) echo "06" ;;      # cp --link -R dirlink half
+    cross-dev-symlink) echo "07" ;;  # needs \$OTHER_PARTITION_TMPDIR
+                                     # framework plumbing (fs lanes)
     acl) echo "06" ;;             # setfacl vs the ACL-disabled oracle;
                                   # xattr-parity behavior is golden-
                                   # covered (meta-xattr); revisit with
@@ -72,6 +77,13 @@ run_script() {
     mkdir -p "$d/tests" "$d/bin" "$d/sandbox"
     cp tests/gnu-mined/shim.sh "$d/tests/init.sh"
     ln -s "$rs_tool" "$d/bin/cp"
+    # Synthesized config header (catalog: scripts grep build defines).
+    cat > "$d/confighdr" <<'HDR'
+#define HAVE_LINKAT 1
+/* #undef LINKAT_SYMLINK_NOTSUP */
+#define LINK_FOLLOWS_SYMLINKS 0
+#define HAVE_UTIMENSAT 1
+HDR
     (
         cd "$d/sandbox" || exit 99
         umask 022
@@ -80,6 +92,7 @@ run_script() {
             HOME="$d/sandbox" \
             LC_ALL=C LANGUAGE=C TZ=UTC0 \
             srcdir="$d" \
+            CONFIG_HEADER="$d/confighdr" \
             sh "$corpus/$rs_script.sh"
     ) > "$d/log" 2>&1
     echo $?

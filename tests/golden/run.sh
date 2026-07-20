@@ -700,6 +700,107 @@ meta "-t -x" meta-all-word "preserve=all word" ORDERED C 0 \
 meta "" meta-noall "no-preserve=all" ORDERED C 0 \
     -- --no-preserve=all s d/p10
 
+# --- sprint 05: symlink/hardlink matrix -------------------------------
+
+seed_links() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/d" "$s/dst"
+    printf 'alpha\n' > "$s/f"
+    ln "$s/f" "$s/g"
+    ln -s f "$s/s1"
+    ln -s f "$s/s2"
+    ln -s nowhere "$s/dang"
+    printf 'old\n' > "$s/dst/e"
+    ln -s ../f "$s/d/insub"
+    printf 'e2\n' > "$s/e2"
+    touch -d '2021-01-01 00:00:00' "$s/e2"
+    touch -d '2021-01-01 00:00:00' "$s/f" "$s/dst/e"
+    touch -h -d '2021-01-01 00:00:00' "$s/s1" "$s/s2" "$s/dang" \
+        "$s/d/insub" 2>/dev/null || true
+}
+lk() {
+    lk_flags="$1"; shift
+    CASE_SEED=seed_links
+    MANIFEST_FLAGS="$lk_flags"
+    run_case "$@"
+    CASE_SEED=
+    MANIFEST_FLAGS=
+}
+lk "" lk-P-copy "-P copies the symlink" ORDERED C 0 -- -P s1 dst/s1c
+lk "" lk-P-dangling "-P copies a dangling symlink" ORDERED C 0 \
+    -- -P dang dst/dc
+lk "" lk-deref "default deref follows" ORDERED C 0 -- s1 dst/deref
+lk "" lk-dangling-err "default dangling cannot stat" ORDERED C 1 \
+    -- dang dst/nope
+lk "" lk-s-relative-refused "-s relative source outside cwd" ORDERED C 1 \
+    -- -s f dst/sl
+lk "" lk-s-cwd "-s in current directory" ORDERED C 0 -- -s f slhere
+# Relative -s demands the dest in cwd REGARDLESS of -f (quirk 4).
+lk "" lk-s-force-outside "-s -f still cwd-bound" ORDERED C 1 \
+    -- -s -f f dst/e
+lk "" lk-s-force-cwd "-s -f replaces in cwd" ORDERED C 0 \
+    -- -s -f f e2
+lk "" lk-s-noforce "-s existing dest refused" ORDERED C 1 -- -s f dst/e
+lk "" lk-l "-l hardlink" ORDERED C 0 -- -l f dst/l1
+lk "" lk-l-existing "-l existing dest refused" ORDERED C 1 -- -l f dst/e
+lk "" lk-l-force "-l -f atomic replace" ORDERED C 0 -- -l -f f dst/e
+lk "" lk-l-force-v "removed line on -l -f -v" ORDERED C 0 \
+    -- -l -f -v f dst/e
+lk "" lk-l-P-symlink "-l -P hardlinks the symlink itself" ORDERED C 0 \
+    -- -l -P s1 dst/lp
+lk "" lk-d "-d preserves the symlink" ORDERED C 0 -- -d s1 dst/ds
+lk "-t" lk-P-p-times "-P -p preserves symlink times" ORDERED C 0 \
+    -- -P -p s1 dst/spt
+lk "" lk-preserve-links "hardlink pair collapses" ORDERED C 0 \
+    -- -L --preserve=links f g dst
+lk "" lk-links-symfile "file+symlink collapse under -L" ORDERED C 0 \
+    -- -L --preserve=links f s1 dst
+lk "" lk-H "-H top-level deref" ORDERED C 0 -- -H s1 dst/h1
+lk "" lk-multilink-plain "hardlink pair copies twice plain" ORDERED C 0 \
+    -- f g dst
+lk "" lk-update-older-samelink "DEV-003 kept quirk" ORDERED C 0 \
+    -- -P --update=older s1 s2
+
+# EXDEV: only meaningful where a second filesystem root is registered
+# (the 04D fs job); the first registered root hosts the cross-device
+# destination.
+for exroot in ${CHOPIN_TEST_FSROOT:-}; do
+    [ -d "$exroot" ] && [ -w "$exroot" ] || continue
+    cases=$((cases + 1))
+    if [ "$PARITY_ACTIVE" != 1 ]; then
+        skipped=$((skipped + 1))
+        break
+    fi
+    exdst="$exroot/chopin-exdev.$$"
+    rmtree "$exdst"; mkdir -p "$exdst/A" "$exdst/B"
+    mkpair case-exdev seed_links
+    cdir="$work/case-exdev"
+    for f in A.out A.err B.out B.err A.rc B.rc A.man B.man; do
+        : > "$cdir/$f"
+    done
+    for side in A B; do
+        if [ "$side" = A ]; then tool="$oracle"; else tool="$uut"; fi
+        run_pinned C "$cdir/$side" "$tool" -l f "$exdst/$side/l" \
+            > "$cdir/$side.out" 2> "$cdir/$side.err" < /dev/null
+        echo $? > "$cdir/$side.rc"
+        assert_contained "$exdst/$side"
+    done
+    # -l across devices: EXDEV failure bytes must match.
+    normprog < "$cdir/A.err" > "$cdir/A.err.n"
+    normprog < "$cdir/B.err" > "$cdir/B.err.n"
+    if [ "$(cat "$cdir/A.rc")" = "$(cat "$cdir/B.rc")" ] \
+        && cmp -s "$cdir/A.err.n" "$cdir/B.err.n"; then
+        passed=$((passed + 1))
+        rmtree "$cdir"
+    else
+        fail_case exdev "-l across devices differs"
+        diff "$cdir/A.err.n" "$cdir/B.err.n" | head -4
+    fi
+    rmtree "$exdst"
+    break
+done
+
 # Dev tier: DEV-001 single-space fix, pinned corrected bytes.
 CASE_SEED=seed_backup
 run_case_dev backup-space "DEV-001 single-space refusal" C \
