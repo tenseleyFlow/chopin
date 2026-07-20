@@ -171,6 +171,67 @@ else
         || bad "manifest nondeterministic across runs"
 fi
 
+# --- Quirk 18 pin (sprint 08): the replaced-while-copying check.
+# The -i prompt blocks between the pre-open stat and the open; the
+# unit swaps the source inside that window - deterministic, no
+# LD_PRELOAD. Differential: oracle and chopin share the window.
+q18() {
+    q18_tool="$1"
+    q18_dir=$(mktemp -d "${TMPDIR:-/tmp}/chopin-q18.XXXXXX")
+    (
+        cd "$q18_dir" || exit 9
+        printf 'one\n' > src
+        printf 'old\n' > dst
+        mkfifo answers || exit 9
+        env -i PATH=/usr/bin:/bin LC_ALL=C "$q18_tool" -i src dst \
+            < answers 2> err &
+        q18_pid=$!
+        exec 8> answers      # connect a writer; prompt is now pending
+        # Wait DETERMINISTICALLY for the prompt to reach stderr (no
+        # timing race); swap the source only then.
+        q18_i=0
+        while ! grep -q 'overwrite' err 2>/dev/null; do
+            q18_i=$((q18_i + 1))
+            [ "$q18_i" -gt 200 ] && break   # 10s ceiling
+            sleep 0.05
+        done
+        rm -f src
+        printf 'two\n' > src # same name, new inode
+        printf 'y\n' >&8
+        exec 8>&-
+        wait $q18_pid
+        echo $? > rc
+    )
+    q18_out="$q18_dir"
+}
+if command -v mkfifo >/dev/null 2>&1; then
+    q18 "$root/chopin"; cdir="$q18_out"
+    q18 "$(sh scripts/find-gnu-cp.sh 2>/dev/null || echo ./chopin)"
+    odir="$q18_out"
+    if grep -q 'replaced while being copied' "$cdir/err"; then
+        note "ok: quirk-18 diagnostic fires in the swap window"
+    else
+        bad "quirk-18 diagnostic missing"
+        cat "$cdir/err"
+    fi
+    # The prompt and the skip diagnostic share one line (prompt has no
+    # newline); split at "? " then normalize BOTH program tokens.
+    norm18() {
+        awk '{ gsub(/\? /, "?\n"); print }' "$1/err" \
+            | sed -e 's/^cp:/PROG:/' -e 's/^chopin:/PROG:/' \
+            | grep 'replaced while'
+    }
+    if [ "$(norm18 "$cdir")" = "$(norm18 "$odir")" ] \
+        && [ "$(cat "$cdir/rc")" = "$(cat "$odir/rc")" ]; then
+        note "ok: quirk-18 bytes and rc match the oracle"
+    else
+        bad "quirk-18 differs from oracle"
+    fi
+    rm -rf "$cdir" "$odir"
+else
+    note "skip: quirk-18 pin (no mkfifo)"
+fi
+
 # --- Metadata order pin (sprint 04A): utimensat before fchown before
 # fsetxattr before fchmod under -a. strace is Linux-lane-only; clean
 # skip elsewhere (sprint 04 scoping rule).
