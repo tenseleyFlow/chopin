@@ -204,8 +204,14 @@ q18() {
     )
     q18_out="$q18_dir"
 }
+# Differential only against the feature-pinned build (the golden/
+# mined/fuzz rule): a brew/pkg cp of another vintage diverges on
+# wording and program token.
 oracle18=$(sh scripts/find-gnu-cp.sh 2>/dev/null || true)
-if command -v mkfifo >/dev/null 2>&1 && [ -n "$oracle18" ]; then
+o18pin=0
+case "$oracle18" in "$root/build/gnu-cp/src/cp") o18pin=1 ;; esac
+[ "${CHOPIN_ORACLE_STRICT:-}" = 1 ] && o18pin=1
+if command -v mkfifo >/dev/null 2>&1 && [ "$o18pin" = 1 ]; then
     q18 "$root/chopin"; cdir="$q18_out"
     q18 "$oracle18"; odir="$q18_out"
     # The prompt and the skip diagnostic share one line (prompt has no
@@ -238,7 +244,7 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$oracle18" ]; then
     fi
     rm -rf "$cdir" "$odir"
 else
-    note "skip: quirk-18 pin (no mkfifo/oracle)"
+    note "skip: quirk-18 differential (no mkfifo or non-pinned oracle)"
 fi
 
 # --- Metadata order pin (sprint 04A): utimensat before fchown before
