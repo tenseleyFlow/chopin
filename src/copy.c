@@ -1,5 +1,6 @@
 #include "copy.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -45,6 +46,38 @@ last_component_of(const char *name)
 /* linkat(0 flags) links the symlink itself on Linux/macOS/FreeBSD
    (POSIX 2008 default). */
 #define CHOPIN_CAN_HARDLINK_SYMLINKS 1
+
+/* Recursion state (copy.c dir_list): the chain of source dirs above
+   this point, for cycle detection. */
+struct dir_list {
+    struct dir_list *parent;
+    ino_t st_ino;
+    dev_t st_dev;
+};
+
+/* Into-itself diagnostics print the TOP-LEVEL names (quirk 19). */
+static const char *top_level_src_name;
+static const char *top_level_dst_name;
+
+static bool copy_internal(const char *src_name, const char *dst_name,
+                          int dst_dirfd, const char *dst_relname,
+                          int nonexistent_dst,
+                          const struct stat *parent_sb,
+                          struct dir_list *ancestors,
+                          const struct chopin_options *x,
+                          bool command_line_arg,
+                          bool *first_dir_created,
+                          bool *copy_into_self);
+
+static bool
+is_ancestor(const struct stat *sb, const struct dir_list *ancestors)
+{
+    for (; ancestors != NULL; ancestors = ancestors->parent)
+        if (ancestors->st_ino == sb->st_ino
+            && ancestors->st_dev == sb->st_dev)
+            return true;
+    return false;
+}
 
 #define SAME_INODE(a, b) \
     ((a).st_ino == (b).st_ino && (a).st_dev == (b).st_dev)
@@ -599,11 +632,118 @@ chopin_copy(const char *src_name, const char *dst_name,
             int nonexistent_dst, const struct chopin_options *x,
             bool *copy_into_self)
 {
+    bool first_dir_created = false;
+
+    top_level_src_name = src_name;
+    top_level_dst_name = dst_name;
+    *copy_into_self = false;
+    return copy_internal(src_name, dst_name, dst_dirfd, dst_relname,
+                         nonexistent_dst, NULL, NULL, x, true,
+                         &first_dir_created, copy_into_self);
+}
+
+/* copy_dir (copy.c:379-440): full name snapshot before copying,
+   sorted by NAME - chopin's deterministic order; the harness compares
+   order-insensitively against GNU's inode order (overview s2). -H
+   demotes to DEREF_NEVER for children. */
+static int
+namecmp(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static bool
+copy_dir(const char *src_name_in, const char *dst_name_in,
+         int dst_dirfd, const char *dst_relname_in, bool new_dst,
+         const struct stat *src_sb, struct dir_list *ancestors,
+         const struct chopin_options *x,
+         bool *first_dir_created_per_command_line_arg,
+         bool *copy_into_self)
+{
+    struct chopin_options non_command_line_options = *x;
+    bool ok = true;
+    DIR *dirp = opendir(src_name_in);
+    char **names = NULL;
+    size_t count = 0, cap = 0, i;
+
+    if (dirp == NULL) {
+        chopin_error(errno, "cannot access %s", chopin_quoteaf(src_name_in));
+        return false;
+    }
+    for (;;) {
+        struct dirent *de;
+
+        errno = 0;
+        de = readdir(dirp);
+        if (de == NULL) {
+            if (errno != 0) {
+                chopin_error(errno, "cannot access %s",
+                             chopin_quoteaf(src_name_in));
+                ok = false;
+            }
+            break;
+        }
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        if (count == cap) {
+            cap = cap ? cap * 2 : 32;
+            names = chopin_xrealloc(names, cap * sizeof *names);
+        }
+        names[count++] = chopin_xstrdup(de->d_name);
+    }
+    closedir(dirp);
+    if (count > 0)
+        qsort(names, count, sizeof *names, namecmp);
+
+    if (x->dereference == CHOPIN_DEREF_COMMAND_LINE_ARGUMENTS)
+        non_command_line_options.dereference = CHOPIN_DEREF_NEVER;
+
+    size_t srclen = strlen(src_name_in);
+    size_t dstlen = strlen(dst_name_in);
+    size_t reloff = (size_t)(dst_relname_in - dst_name_in);
+    bool new_first_dir_created = false;
+
+    for (i = 0; i < count; i++) {
+        bool local_into_self = false;
+        size_t nl = strlen(names[i]);
+        char *csrc = chopin_xmalloc(srclen + 1 + nl + 1);
+        char *cdst = chopin_xmalloc(dstlen + 1 + nl + 1);
+        bool fdc = *first_dir_created_per_command_line_arg;
+
+        snprintf(csrc, srclen + 1 + nl + 1, "%s/%s", src_name_in, names[i]);
+        snprintf(cdst, dstlen + 1 + nl + 1, "%s/%s", dst_name_in, names[i]);
+        ok &= copy_internal(csrc, cdst, dst_dirfd, cdst + reloff,
+                            new_dst ? 1 : 0, src_sb, ancestors,
+                            &non_command_line_options, false,
+                            &fdc, &local_into_self);
+        *copy_into_self |= local_into_self;
+        free(csrc);
+        free(cdst);
+        free(names[i]);
+        if (local_into_self) {
+            while (++i < count)
+                free(names[i]);
+            break;
+        }
+        new_first_dir_created |= fdc;
+    }
+    free(names);
+    *first_dir_created_per_command_line_arg = new_first_dir_created;
+    return ok;
+}
+
+static bool
+copy_internal(const char *src_name, const char *dst_name,
+              int dst_dirfd, const char *dst_relname,
+              int nonexistent_dst, const struct stat *parent_sb,
+              struct dir_list *ancestors, const struct chopin_options *x,
+              bool command_line_arg, bool *first_dir_created,
+              bool *copy_into_self)
+{
     struct stat src_sb;
     struct stat dst_sb;
     bool new_dst = false;
     bool have_dst_sb = false;
-    bool command_line_arg = true;   /* recursion arrives in sprint 06 */
 
     *copy_into_self = false;
 
@@ -615,14 +755,10 @@ chopin_copy(const char *src_name, const char *dst_name,
         return false;
     }
 
-    /* Item 3: directories need -R; the traversal engine is sprint 06. */
-    if (S_ISDIR(src_sb.st_mode)) {
-        if (!x->recursive) {
-            chopin_error(0, "-r not specified; omitting directory %s",
-                         chopin_quoteaf(src_name));
-            return false;
-        }
-        chopin_error(0, "internal: directory copying arrives in sprint 06");
+    /* Item 3: directories need -R. */
+    if (S_ISDIR(src_sb.st_mode) && !x->recursive) {
+        chopin_error(0, "-r not specified; omitting directory %s",
+                     chopin_quoteaf(src_name));
         return false;
     }
 
@@ -641,12 +777,15 @@ chopin_copy(const char *src_name, const char *dst_name,
     bool use_lstat =
         (!S_ISREG(src_sb.st_mode)
          && (!x->copy_as_regular
-             || S_ISDIR(src_sb.st_mode) || S_ISLNK(src_sb.st_mode)))
+             || S_ISDIR(src_sb.st_mode) || S_ISLNK(src_sb.st_mode))
+         && !(S_ISDIR(src_sb.st_mode) && x->keep_directory_symlink))
         || x->symbolic_link || x->hard_link
         || x->backup_type != CHOPIN_BACKUP_NONE
         || x->unlink_dest_before_opening;
 
-    if (nonexistent_dst < 0 && !use_lstat) {
+    if (nonexistent_dst > 0) {
+        new_dst = true;     /* freshly created parent: nothing exists */
+    } else if (nonexistent_dst < 0 && !use_lstat) {
         new_dst = true;
     } else {
         int dflags = use_lstat ? AT_SYMLINK_NOFOLLOW : 0;
@@ -727,7 +866,14 @@ chopin_copy(const char *src_name, const char *dst_name,
             }
         }
 
-        /* dir/non-dir mismatch (src-dir variant is sprint 06). */
+        /* dir/non-dir mismatch (copy.c:1880-1893). */
+        if (S_ISDIR(src_sb.st_mode) && !S_ISDIR(dst_sb.st_mode)) {
+            chopin_error(0, "cannot overwrite non-directory %s with "
+                            "directory %s",
+                         chopin_quoteaf_n(0, dst_name),
+                         chopin_quoteaf_n(1, src_name));
+            return false;
+        }
         if (!S_ISDIR(src_sb.st_mode) && S_ISDIR(dst_sb.st_mode)) {
             chopin_error(0, "cannot overwrite directory %s with "
                             "non-directory %s",
@@ -817,8 +963,23 @@ chopin_copy(const char *src_name, const char *dst_name,
     bool dest_is_symlink = false;
     const char *earlier_file = NULL;
 
-    /* Item 9 (copy.c:2066-2075): record multi-link sources under
-       --preserve=links (dir bookkeeping is sprint 06). */
+    goto after_labels;
+tail_fail:
+    ok = false;
+    goto tail;
+after_labels:
+
+    /* Item 9 (copy.c:2052-2075): dirs record on the command line,
+       look up below it; multi-link sources record under
+       --preserve=links. */
+    if (S_ISDIR(src_sb.st_mode)) {
+        if (command_line_arg)
+            earlier_file = chopin_remember_copied(dst_name, src_sb.st_dev,
+                                                  src_sb.st_ino);
+        else
+            earlier_file = chopin_src_to_dest_lookup(src_sb.st_dev,
+                                                     src_sb.st_ino);
+    }
     if (!S_ISDIR(src_sb.st_mode)
         && x->preserve_links && !x->hard_link
         && (1 < src_sb.st_nlink
@@ -828,8 +989,38 @@ chopin_copy(const char *src_name, const char *dst_name,
         earlier_file = chopin_remember_copied(dst_name, src_sb.st_dev,
                                               src_sb.st_ino);
 
-    /* Item 10 (2134-2142): a non-dir earlier hit hard-links the
-       first dest over this one. */
+    /* Item 10 (2080-2143): earlier-file hits. Dir cases print the
+       TOP-LEVEL names (quirk 19). */
+    if (earlier_file != NULL && S_ISDIR(src_sb.st_mode)) {
+        int sn = chopin_same_nameat(AT_FDCWD, src_name,
+                                    AT_FDCWD, earlier_file);
+        if (sn == 1) {
+            chopin_error(0, "cannot copy a directory, %s, into itself, %s",
+                         chopin_quoteaf_n(0, top_level_src_name),
+                         chopin_quoteaf_n(1, top_level_dst_name));
+            *copy_into_self = true;
+            goto tail_fail;
+        }
+        int dn = chopin_same_nameat(AT_FDCWD, dst_name,
+                                    AT_FDCWD, earlier_file);
+        if (dn == 1) {
+            chopin_error(0, "warning: source directory %s specified "
+                            "more than once", chopin_quoteaf(src_name));
+            free(dst_backup);
+            return true;
+        }
+        if (x->dereference == CHOPIN_DEREF_ALWAYS
+            || (x->dereference == CHOPIN_DEREF_COMMAND_LINE_ARGUMENTS
+                && command_line_arg)) {
+            /* -L/-H revisit: fall through silently. */
+            earlier_file = NULL;
+        } else {
+            chopin_error(0, "will not create hard link %s to directory "
+                            "%s", chopin_quoteaf_n(0, dst_name),
+                         chopin_quoteaf_n(1, earlier_file));
+            goto tail_fail;
+        }
+    }
     if (earlier_file != NULL) {
         if (!create_hard_link(earlier_file, AT_FDCWD, earlier_file,
                               dst_name, dst_dirfd, dst_relname,
@@ -842,7 +1033,87 @@ chopin_copy(const char *src_name, const char *dst_name,
         return true;
     }
 
-    /* Item 14: type dispatch (copy.c:2420-2596). */
+    /* Item 14: type dispatch. Directory branch first
+       (copy.c:2308-2419). */
+    if (S_ISDIR(src_sb.st_mode)) {
+        struct dir_list dir;
+        mode_t dst_mode_bits = src_sb.st_mode & 07777;
+        mode_t omitted = x->preserve_ownership
+            ? (dst_mode_bits & (S_IRWXG | S_IRWXO))
+            : (dst_mode_bits & (S_IWGRP | S_IWOTH));
+        bool restore_dst_mode = false;
+        bool created = false;
+
+        if (is_ancestor(&src_sb, ancestors)) {
+            chopin_error(0, "cannot copy cyclic symbolic link %s",
+                         chopin_quoteaf(src_name));
+            goto tail_fail;
+        }
+        dir.parent = ancestors;
+        dir.st_ino = src_sb.st_ino;
+        dir.st_dev = src_sb.st_dev;
+
+        if (new_dst || !S_ISDIR(dst_sb.st_mode)) {
+            mode_t mode = dst_mode_bits & ~omitted;
+
+            if (mkdirat(dst_dirfd, dst_relname, mode) != 0) {
+                chopin_error(errno, "cannot create directory %s",
+                             chopin_quoteaf(dst_name));
+                goto tail_fail;
+            }
+            created = true;
+            if (fstatat(dst_dirfd, dst_relname, &dst_sb,
+                        AT_SYMLINK_NOFOLLOW) != 0) {
+                chopin_error(errno, "cannot stat %s",
+                             chopin_quoteaf(dst_name));
+                goto tail_fail;
+            }
+            if ((dst_sb.st_mode & S_IRWXU) != S_IRWXU) {
+                restore_dst_mode = true;
+                if (fchmodat(dst_dirfd, dst_relname,
+                             dst_sb.st_mode | S_IRWXU, 0) != 0) {
+                    chopin_error(errno, "setting permissions for %s",
+                                 chopin_quoteaf(dst_name));
+                    goto tail_fail;
+                }
+            }
+            /* First dir created per command-line arg: the
+               cp -R dir dir detector (2369-2377). */
+            if (!*first_dir_created) {
+                chopin_remember_copied(dst_name, dst_sb.st_dev,
+                                       dst_sb.st_ino);
+                *first_dir_created = true;
+            }
+            if (x->verbose)
+                printf("%s -> %s\n", chopin_quoteaf_n(0, src_name),
+                       chopin_quoteaf_n(1, dst_name));
+        } else {
+            omitted = 0;
+        }
+
+        bool delayed_ok = true;
+        if (x->one_file_system && parent_sb != NULL
+            && parent_sb->st_dev != src_sb.st_dev) {
+            /* -x prunes CONTENTS, not the top dir (quirk at
+               2402-2407). */
+        } else {
+            delayed_ok = copy_dir(src_name, dst_name, dst_dirfd,
+                                  dst_relname, created, &src_sb, &dir,
+                                  x, first_dir_created, copy_into_self);
+        }
+
+        /* Post-order: the directory's own metadata after its
+           contents (3.1); rides the call stack, no side structure -
+           the shape sprint 09's barriers adopt. */
+        if (!chopin_apply_meta_dir(src_name, dst_dirfd, dst_relname,
+                                   dst_name, &src_sb, created,
+                                   dst_mode_bits, omitted,
+                                   restore_dst_mode, x))
+            delayed_ok = false;
+
+        ok = delayed_ok;
+        goto tail;
+    }
     if (x->symbolic_link) {
         dest_is_symlink = true;
         if (*src_name != '/') {
@@ -964,9 +1235,49 @@ chopin_copy(const char *src_name, const char *dst_name,
                 }
             }
         }
+    } else if (S_ISFIFO(src_sb.st_mode)) {
+        mode_t mode = src_sb.st_mode
+            & (mode_t)~(x->preserve_ownership
+                        ? (S_IRWXG | S_IRWXO) : 0);
+        if (mknodat(dst_dirfd, dst_relname, mode, 0) != 0
+            && mkfifoat(dst_dirfd, dst_relname,
+                        mode & (mode_t)~S_IFIFO) != 0) {
+            chopin_error(errno, "cannot create fifo %s",
+                         chopin_quoteaf(dst_name));
+            ok = false;
+            goto tail;
+        }
+        if (!chopin_apply_meta_name(dst_dirfd, dst_relname, dst_name,
+                                    &src_sb, true,
+                                    src_sb.st_mode & 07777,
+                                    x->preserve_ownership
+                                        ? (src_sb.st_mode
+                                           & (S_IRWXG | S_IRWXO)) : 0,
+                                    x))
+            ok = false;
+    } else if (S_ISBLK(src_sb.st_mode) || S_ISCHR(src_sb.st_mode)
+               || S_ISSOCK(src_sb.st_mode)) {
+        mode_t mode = src_sb.st_mode
+            & (mode_t)~(x->preserve_ownership
+                        ? (S_IRWXG | S_IRWXO) : 0);
+        if (mknodat(dst_dirfd, dst_relname, mode,
+                    src_sb.st_rdev) != 0) {
+            chopin_error(errno, "cannot create special file %s",
+                         chopin_quoteaf(dst_name));
+            ok = false;
+            goto tail;
+        }
+        if (!chopin_apply_meta_name(dst_dirfd, dst_relname, dst_name,
+                                    &src_sb, true,
+                                    src_sb.st_mode & 07777,
+                                    x->preserve_ownership
+                                        ? (src_sb.st_mode
+                                           & (S_IRWXG | S_IRWXO)) : 0,
+                                    x))
+            ok = false;
     } else {
-        chopin_error(0, "internal: special-file dispatch arrives in "
-                        "sprint 06");
+        chopin_error(0, "%s has unknown file type",
+                     chopin_quoteaf(src_name));
         ok = false;
     }
 

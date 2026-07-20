@@ -1,6 +1,7 @@
 #include "meta.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -137,6 +138,134 @@ copy_xattrs_fd(int src_fd, const char *src_name, int dest_fd,
 #endif
 }
 
+/* Name-based tail for special files (copy.c:2642-2684 shape). */
+bool
+chopin_apply_meta_name(int dst_dirfd, const char *dst_relname,
+                       const char *dst_name,
+                       const struct stat *src_sb, bool new_dst,
+                       mode_t dst_mode, mode_t omitted_permissions,
+                       const struct chopin_options *x)
+{
+    bool return_val = true;
+    mode_t mode_to_apply = dst_mode;
+
+    if (x->preserve_timestamps) {
+        struct timespec ts[2];
+
+#if CHOPIN_HAVE_ST_MTIM
+        ts[0] = src_sb->st_atim;
+        ts[1] = src_sb->st_mtim;
+#elif CHOPIN_HAVE_ST_MTIMESPEC
+        ts[0] = src_sb->st_atimespec;
+        ts[1] = src_sb->st_mtimespec;
+#else
+        ts[0].tv_sec = src_sb->st_atime;
+        ts[0].tv_nsec = 0;
+        ts[1].tv_sec = src_sb->st_mtime;
+        ts[1].tv_nsec = 0;
+#endif
+        if (utimensat(dst_dirfd, dst_relname, ts, 0) != 0) {
+            chopin_error(errno, "preserving times for %s",
+                         chopin_quoteaf(dst_name));
+            if (x->require_preserve)
+                return_val = false;
+        }
+    }
+    if (x->preserve_ownership) {
+        if (fchownat(dst_dirfd, dst_relname, src_sb->st_uid,
+                     src_sb->st_gid, 0) != 0) {
+            if (chopin_chown_failure_ok()) {
+                if (fchownat(dst_dirfd, dst_relname, (uid_t)-1,
+                             src_sb->st_gid, 0) != 0
+                    && !chopin_chown_failure_ok()) {
+                    chopin_error(errno, "failed to preserve ownership "
+                                        "for %s", chopin_quoteaf(dst_name));
+                    if (x->require_preserve)
+                        return_val = false;
+                }
+                mode_to_apply &=
+                    (mode_t)~(S_ISUID | S_ISGID | S_ISVTX);
+            } else {
+                chopin_error(errno, "failed to preserve ownership for %s",
+                             chopin_quoteaf(dst_name));
+                if (x->require_preserve)
+                    return_val = false;
+            }
+        }
+    }
+    if (x->preserve_mode) {
+        if (fchmodat(dst_dirfd, dst_relname, mode_to_apply, 0) != 0) {
+            chopin_error(errno, "preserving permissions for %s",
+                         chopin_quoteaf(dst_name));
+            if (x->require_preserve)
+                return_val = false;
+        }
+    } else if (omitted_permissions != 0) {
+        if (fchmodat(dst_dirfd, dst_relname,
+                     dst_mode & ~chopin_cached_umask(), 0) != 0) {
+            chopin_error(errno, "preserving permissions for %s",
+                         chopin_quoteaf(dst_name));
+            if (x->require_preserve)
+                return_val = false;
+        }
+    }
+    (void)new_dst;
+    return return_val;
+}
+
+/* Directory tail: open both by name and reuse the fd path. */
+bool
+chopin_apply_meta_dir(const char *src_name, int dst_dirfd,
+                      const char *dst_relname, const char *dst_name,
+                      const struct stat *src_sb, bool new_dst,
+                      mode_t dst_mode, mode_t omitted_permissions,
+                      bool restore_mode,
+                      const struct chopin_options *x)
+{
+    int dfd = openat(dst_dirfd, dst_relname, O_RDONLY | O_DIRECTORY);
+    int sfd = -1;
+    bool ok;
+
+    if (dfd < 0) {
+        chopin_error(errno, "cannot stat %s", chopin_quoteaf(dst_name));
+        return false;
+    }
+    if (x->preserve_xattr)
+        sfd = open(src_name, O_RDONLY | O_DIRECTORY);
+
+    /* Quirk 32: --no-preserve=mode gives DIRS S_IRWXUGO & ~umask,
+       keeping an inherited setgid bit (copy.c:2695-2704) - the file
+       default in the shared tail would be wrong here, so the dir
+       case is handled locally with a preserve-neutral delegate. */
+    if (x->explicit_no_preserve_mode && new_dst) {
+        struct chopin_options x_local = *x;
+        struct stat cur;
+
+        x_local.explicit_no_preserve_mode = false;
+        x_local.preserve_mode = false;
+        ok = chopin_apply_meta_fd(sfd, src_name, dfd, dst_name, src_sb,
+                                  NULL, new_dst, dst_mode, 0, 0,
+                                  &x_local);
+        if (fstat(dfd, &cur) != 0
+            || fchmod(dfd, (0777 & ~chopin_cached_umask())
+                           | (cur.st_mode & S_ISGID)) != 0) {
+            chopin_error(errno, "preserving permissions for %s",
+                         chopin_quoteaf(dst_name));
+            if (x->require_preserve)
+                ok = false;
+        }
+    } else {
+        ok = chopin_apply_meta_fd(sfd, src_name, dfd, dst_name, src_sb,
+                                  NULL, new_dst, dst_mode,
+                                  omitted_permissions,
+                                  restore_mode ? S_IRWXU : 0, x);
+    }
+    if (sfd >= 0)
+        close(sfd);
+    close(dfd);
+    return ok;
+}
+
 bool
 chopin_apply_meta_fd(int src_fd, const char *src_name,
                      int dest_fd, const char *dst_name,
@@ -185,7 +314,7 @@ chopin_apply_meta_fd(int src_fd, const char *src_name,
     }
 
     /* 3. xattr. */
-    if (x->preserve_xattr) {
+    if (x->preserve_xattr && src_fd >= 0) {
         if (!copy_xattrs_fd(src_fd, src_name, dest_fd, dst_name, x))
             return_val = false;
     }

@@ -22,6 +22,24 @@ bool chopin_apply_meta_fd(int src_fd, const char *src_name,
                           mode_t extra_permissions,
                           const struct chopin_options *x);
 
+/* Name-based tail for directories (post-order: after contents).
+   restore_mode forces the final chmod even without preserve flags
+   (the S_IRWXU temporary widen). src_fd < 0 skips the xattr pass. */
+/* Fully name-based tail (*at calls only): special files, whose
+   open would block or fail. No xattr pass. */
+bool chopin_apply_meta_name(int dst_dirfd, const char *dst_relname,
+                            const char *dst_name,
+                            const struct stat *src_sb, bool new_dst,
+                            mode_t dst_mode, mode_t omitted_permissions,
+                            const struct chopin_options *x);
+
+bool chopin_apply_meta_dir(const char *src_name, int dst_dirfd,
+                           const char *dst_relname, const char *dst_name,
+                           const struct stat *src_sb, bool new_dst,
+                           mode_t dst_mode, mode_t omitted_permissions,
+                           bool restore_mode,
+                           const struct chopin_options *x);
+
 mode_t chopin_cached_umask(void);
 
 /* Benign chown-failure test (EPERM/EINVAL/EACCES without
