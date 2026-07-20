@@ -322,7 +322,9 @@ sparse_copy(int src_fd, int dest_fd, size_t bsize,
 
     *last_write_made_hole = false;
 
-#if CHOPIN_HAVE_COPY_FILE_RANGE
+#if !CHOPIN_HAVE_COPY_FILE_RANGE
+    (void)allow_offload;    /* the offload block compiles out */
+#else
     if (!hole_detection && allow_offload) {
         static bool force_scalar_checked;
         static bool force_scalar;
