@@ -55,6 +55,7 @@ struct chopin_options {
     bool unlink_dest_before_opening;    /* --remove-destination */
     bool unlink_dest_after_failed_open; /* -f */
     bool hard_link;                     /* -l */
+    bool move_mode;                     /* mv seam; never true in cp */
     enum chopin_interactive interactive;
     bool one_file_system;               /* -x */
     bool preserve_ownership;

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "backup.h"
 #include "quote.h"
 #include "util.h"
 
@@ -618,11 +619,12 @@ chopin_options_resolve(struct chopin_invocation *inv)
         chopin_try_help_and_die();
     }
 
-    /* 6. backup_type + suffix registration (suffix env rules and
-          validation land in sprint 03 with the backup engine). */
+    /* 6. backup_type + suffix registration (backupfile.c:77-88 env
+          rules inside chopin_set_simple_backup_suffix). */
     x->backup_type = inv->make_backups
         ? xget_version("backup type", inv->version_control_string)
         : CHOPIN_BACKUP_NONE;
+    chopin_set_simple_backup_suffix(x->backup_suffix);
 
     /* 7. DEREF_UNDEFINED default; cp -R -l defaults to -L. */
     if (x->dereference == CHOPIN_DEREF_UNDEFINED) {
