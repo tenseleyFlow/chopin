@@ -44,7 +44,10 @@ config.mk config.h: configure
 %.o: %.c config.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-check: unit golden fuzz-smoke perf-smoke
+check: unit golden mined fuzz-smoke perf-smoke
+
+mined: all
+	sh tests/gnu-mined/run.sh || test $$? -eq 77
 
 # The manifest tool is shared by the unit and golden tiers; make owns
 # the build so parallel `make check` cannot race on the artifact.
