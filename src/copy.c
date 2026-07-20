@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -418,18 +419,11 @@ overwrite_ok(const struct chopin_options *x, const char *dst_name,
     return yesno();
 }
 
-/* --debug per-file line (copy-file-data.c emit_debug shape). The
-   scalar era reports truthfully: nothing attempted. Byte-parity of
-   VALUES vs GNU is deliberately deferred to sprint 07 (GNU's
-   reflink=auto attempts FICLONE on every file); the SHAPE is final. */
-struct copy_debug {
-    const char *offload;
-    const char *reflink;
-    const char *sparse;
-};
-
+/* --debug per-file line (copy-file-data.c emit_debug): byte-parity
+   with GNU's vocabulary from sprint 07 on. */
 static void
-emit_debug(const struct chopin_options *x, const struct copy_debug *d)
+emit_debug(const struct chopin_options *x,
+           const struct chopin_copy_debug *d)
 {
     if (!x->debug || x->hard_link || x->symbolic_link
         || !x->data_copy_required)
@@ -453,7 +447,10 @@ copy_reg(const char *src_name, const char *dst_name,
     bool have_dest_sb_pre = false;
     struct stat dest_sb_pre;
     bool return_val = true;
-    struct copy_debug debug = { "no", "no", "no" };
+    /* GNU reports stages never consulted as "unknown" (a successful
+       clone leaves offload/sparse unknown); the data path downgrades
+       its own stages to "no" on entry. */
+    struct chopin_copy_debug debug = { "unknown", "unknown", "unknown" };
     int open_flags = O_RDONLY
         | (x->dereference == CHOPIN_DEREF_NEVER ? O_NOFOLLOW : 0);
 
@@ -541,8 +538,51 @@ copy_reg(const char *src_name, const char *dst_name,
         goto close_src_desc;
     }
 
-    /* Engine ladder: FICLONE and copy_file_range land in sprint 07;
-       everything routes scalar (plan reports engine=scalar). */
+    /* Engine ladder rung 1: FICLONE (copy.c:1006-1011). Attempted for
+       every regular copy under reflink!=never - except through
+       chopin's per-(src_dev,dst_dev) failed-probe cache (overview
+       s5): non-CoW pairs pay ONE failed ioctl per run, not one per
+       file. REFLINK_ALWAYS bypasses the cache (each file must
+       attempt). --debug still reports per-file vocabulary (the cache
+       changes syscalls, not output). */
+    bool data_done = false;
+
+    if (x->data_copy_required
+        && x->reflink_mode != CHOPIN_REFLINK_NEVER) {
+        int clone_err = chopin_clone_file(dest_desc, source_desc,
+                                          src_open_sb.st_dev,
+                                          *new_dst, x);
+        if (clone_err == 0) {
+            debug.reflink = "yes";
+            data_done = true;
+        } else if (clone_err > 0) {
+            /* handle_clone_fail (679-710): diagnose when ALWAYS or
+               terminal; unlink a fresh dest; fatal iff ALWAYS or
+               terminal. */
+            bool terminal = clone_err == EIO || clone_err == ENOMEM
+                || clone_err == ENOSPC || clone_err == EDQUOT;
+            if (x->reflink_mode == CHOPIN_REFLINK_ALWAYS || terminal) {
+                chopin_error(clone_err, "failed to clone %s from %s",
+                             chopin_quoteaf_n(0, dst_name),
+                             chopin_quoteaf_n(1, src_name));
+                if (x->reflink_mode == CHOPIN_REFLINK_ALWAYS && *new_dst
+                    && (!terminal
+                        || lseek(dest_desc, 0, SEEK_END) == 0)) {
+                    if (unlinkat(dst_dirfd, dst_relname, 0) != 0)
+                        chopin_error(errno, "cannot remove %s",
+                                     chopin_quoteaf(dst_name));
+                }
+                return_val = false;
+                goto close_src_and_dst_desc;
+            }
+            debug.reflink = "unsupported";
+        } else {
+            /* Cache hit: probe skipped. */
+            debug.reflink = "unsupported";
+        }
+    } else if (x->data_copy_required) {
+        debug.reflink = "no";
+    }
 
     if (fstat(dest_desc, &sb) != 0) {
         chopin_error(errno, "cannot fstat %s", chopin_quoteaf(dst_name));
@@ -561,9 +601,9 @@ copy_reg(const char *src_name, const char *dst_name,
             extra_permissions = 0;
     }
 
-    if (x->data_copy_required) {
+    if (x->data_copy_required && !data_done) {
         if (!chopin_copy_file_data(source_desc, &src_open_sb, src_name,
-                                   dest_desc, &sb, dst_name))
+                                   dest_desc, &sb, dst_name, x, &debug))
             return_val = false;
     }
 
@@ -575,10 +615,10 @@ copy_reg(const char *src_name, const char *dst_name,
                               extra_permissions, x))
         return_val = false;
 
-    /* CHOPIN_DEBUG_VERIFY v1: re-fstat the dest and assert what this
-       copy claims (size when data traveled; mode under preserve_mode,
-       tolerating the soft-ownership set-id strip). Content re-read
-       arrives with the fast engines (sprint 07). */
+    /* CHOPIN_DEBUG_VERIFY v2 (the inverted oracle at full strength):
+       re-fstat asserts size/mode; a full content re-read compares
+       the destination against the source byte-for-byte after ANY
+       engine, plus a sparseness-class sanity bound. */
     if (return_val) {
         static int verify = -1;
 
@@ -606,6 +646,40 @@ copy_reg(const char *src_name, const char *dst_name,
                 if (got != want && got != want_soft)
                     chopin_die(0, "VERIFY: mode %04o on %s",
                                (unsigned)got, chopin_quoteaf(dst_name));
+            }
+            /* v2: content re-read after ANY engine. dest_desc is
+               write-only; re-open by name for reading. */
+            if (x->data_copy_required && S_ISREG(src_open_sb.st_mode)) {
+                static char vs[65536], vd[65536];
+                int vfd = openat(dst_dirfd, dst_relname, O_RDONLY);
+
+                if (vfd < 0 || lseek(source_desc, 0, SEEK_SET) != 0)
+                    chopin_die(errno, "VERIFY: cannot reopen %s",
+                               chopin_quoteaf(dst_name));
+                for (;;) {
+                    ssize_t ns = read(source_desc, vs, sizeof vs);
+                    ssize_t nd = read(vfd, vd, sizeof vd);
+
+                    if (ns < 0 || nd < 0)
+                        chopin_die(errno, "VERIFY: re-read failed on %s",
+                                   chopin_quoteaf(dst_name));
+                    if (ns != nd || memcmp(vs, vd, (size_t)ns) != 0)
+                        chopin_die(0, "VERIFY: content mismatch on %s",
+                                   chopin_quoteaf(dst_name));
+                    if (ns == 0)
+                        break;
+                }
+                close(vfd);
+                /* Sparseness sanity: the dest never occupies more
+                   blocks than data + fs slack when holes were asked
+                   for on a sparse source. */
+                if (x->sparse_mode == CHOPIN_SPARSE_ALWAYS
+                    && (intmax_t)src_open_sb.st_blocks * 512
+                       < src_open_sb.st_size
+                    && (intmax_t)vsb.st_blocks * 512
+                       > src_open_sb.st_size + (intmax_t)1048576)
+                    chopin_die(0, "VERIFY: sparseness lost on %s",
+                               chopin_quoteaf(dst_name));
             }
         }
     }
