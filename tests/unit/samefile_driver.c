@@ -125,6 +125,18 @@ main(void)
     base_opts(&x); x.unlink_dest_before_opening = true;
     check("case5-rd-symlink-dst", "f", "s1", &x, true, false);
 
+    /* DEV-004: same_nameat with an unstat-able parent returns -1
+       after diagnosing (GNU error(1,...)s and aborts the run;
+       lib/same.c:101,139). Same basenames force the parent stat. */
+    {
+        int sn = chopin_same_nameat(AT_FDCWD, "no-such-dir/x",
+                                    AT_FDCWD, "no-such-dir2/x");
+        if (sn != -1) {
+            printf("FAIL dev004-parent-stat: sn=%d want -1\n", sn);
+            failures++;
+        }
+    }
+
     /* Cleanup. */
     (void)!chdir("/");
     char cmd[128];
@@ -135,6 +147,6 @@ main(void)
         printf("samefile_driver: %d FAILED\n", failures);
         return 1;
     }
-    printf("samefile_driver: 16 cases ok\n");
+    printf("samefile_driver: 17 cases ok\n");
     return 0;
 }

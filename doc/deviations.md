@@ -45,7 +45,9 @@ stat fails (lib/same.c:101,139), aborting the whole run instead of
 failing the one file (quirk register 21). chopin reports
 `cannot stat %s` and fails only that file.
 Upstream: draft ready.
-Pinned by: dev-tier case (sprint 03).
+Pinned by: unit (samefile_driver dev004-parent-stat) - the failing
+parent stat needs a mid-comparison race to reach through the CLI, so
+the pin exercises the function surface directly.
 
 ## DEV-005 sparse_copy hole-punch success-on-failure [FIX - lands sprint 07]
 
