@@ -63,7 +63,7 @@ if ! "$cc_bin" -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 $extra \
     -I. -Isrc -Wall -Wextra -Werror -pthread \
     -o build/samefile_driver-unittest tests/unit/samefile_driver.c \
     src/copy.c src/copydata.c src/forcelink.c src/backup.c src/hashes.c src/meta.c src/options.c \
-    src/plan.c src/quote.c src/util.c; then
+    src/parallel.c src/plan.c src/pool.c src/quote.c src/util.c; then
     bad "samefile_driver does not compile/link"
 else
     build/samefile_driver-unittest || bad "same_file_ok matrix failed"
