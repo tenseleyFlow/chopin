@@ -16,7 +16,9 @@ SRC = \
 	src/main.c \
 	src/meta.c \
 	src/options.c \
+	src/parallel.c \
 	src/plan.c \
+	src/pool.c \
 	src/quote.c \
 	src/util.c
 

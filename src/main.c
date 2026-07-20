@@ -23,6 +23,7 @@
 #include "hashes.h"
 #include "meta.h"
 #include "options.h"
+#include "parallel.h"
 #include "plan.h"
 #include "quote.h"
 #include "util.h"
@@ -386,6 +387,11 @@ finish(const struct chopin_invocation *inv, bool debug_options,
 {
     struct chopin_plan plan;
 
+    /* Final join point (sprint 09B): every payload completes and
+       replays before the exit status is computed. */
+    ok &= chopin_parallel_barrier();
+    chopin_parallel_shutdown();
+
     chopin_plan_init(&plan, &inv->x, new_dst);
     chopin_plan_maybe_debug(&plan);
 
@@ -462,6 +468,7 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
     bool ok = true;
 
     if (target_directory) {
+        chopin_parallel_class_dst(target_dirfd);
         /* Guard tables only when they can matter (cp.c:746-753): the
            cp-a-a-b and same-source-twice guards are OFF for
            single-source copies. */
@@ -515,10 +522,14 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
                     ok &= chopin_copy(arg, dst_name, target_dirfd, rel,
                                       pnew_dst ? 1 : 0, &inv->x,
                                       &into_self);
-                    if (inv->parents_option)
+                    if (inv->parents_option) {
+                        /* re_protect narrows parent-dir perms; every
+                           payload inside them must land first. */
+                        ok &= chopin_parallel_barrier();
                         ok &= re_protect(dst_name, src_off,
                                          target_dirfd, attr_list,
                                          &inv->x);
+                    }
                 }
                 while (attr_list != NULL) {
                     struct dir_attr *next = attr_list->next;
@@ -535,6 +546,8 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
                             "directory");
             chopin_try_help_and_die();
         }
+
+        chopin_parallel_class_dst(AT_FDCWD);
 
         /* 'cp --force --backup foo foo' rewrites dest to the backup
            name and clears backup_type for the actual copy

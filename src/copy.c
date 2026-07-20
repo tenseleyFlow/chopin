@@ -16,6 +16,7 @@
 #include "meta.h"
 #include "forcelink.h"
 #include "hashes.h"
+#include "parallel.h"
 #include "quote.h"
 #include "util.h"
 
@@ -415,6 +416,8 @@ overwrite_ok(const struct chopin_options *x, const char *dst_name,
              int dst_dirfd, const char *dst_relname,
              const struct stat *dst_sb)
 {
+    /* All earlier stderr must precede the prompt (sprint 09B). */
+    chopin_parallel_flush_for_prompt();
     if (!writable_destination(dst_dirfd, dst_relname, dst_sb->st_mode)) {
         char perms[11];
 
@@ -714,6 +717,86 @@ close_src_desc:
     return return_val;
 }
 
+/* ---- Parallel payload (sprint 09B) --------------------------------
+   The dispatch unit is one regular-file payload: the WORKER does
+   open/copy/close + metadata via the unchanged copy_reg (its
+   diagnostics land in the slot through the thread capture); the
+   spine pre-computed the decision and already emitted the -v line in
+   traversal order. The join hook runs on the spine at replay time
+   and performs the tail bookkeeping copy_internal would have done
+   inline: forget_created on failure, dest_info backfill on success.
+
+   The options pointer stays valid because every copy_dir barriers
+   before its stack frame dies; strings are payload-owned. */
+struct reg_payload {
+    char *src_name;
+    char *dst_name;
+    size_t rel_off;
+    int dst_dirfd;
+    const struct chopin_options *x;
+    mode_t dst_mode;
+    mode_t omitted;
+    bool new_dst;
+    struct stat src_sb;
+    bool record_dest;           /* cmdline && multi-source: item 15 */
+    bool have_dst_sb_out;
+    struct stat dst_sb_out;
+};
+
+static bool
+reg_payload_run(void *arg)
+{
+    struct reg_payload *p = arg;
+    bool ok = copy_reg(p->src_name, p->dst_name, p->dst_dirfd,
+                       p->dst_name + p->rel_off, p->x, p->dst_mode,
+                       p->omitted, &p->new_dst, &p->src_sb);
+
+    /* dest_info dev/ino backfill: fstat the result by name NOFOLLOW,
+       exactly the stat serial copy_internal does at its tail. */
+    if (ok && p->record_dest
+        && fstatat(p->dst_dirfd, p->dst_name + p->rel_off,
+                   &p->dst_sb_out, AT_SYMLINK_NOFOLLOW) == 0)
+        p->have_dst_sb_out = true;
+    return ok;
+}
+
+static void
+reg_payload_join(void *arg, bool ok)
+{
+    struct reg_payload *p = arg;
+
+    if (!ok)
+        chopin_forget_created(p->src_sb.st_dev, p->src_sb.st_ino);
+    if (ok && p->record_dest && p->have_dst_sb_out)
+        chopin_dest_record(p->dst_name + p->rel_off, &p->dst_sb_out);
+    free(p->src_name);
+    free(p->dst_name);
+    free(p);
+}
+
+/* Eligibility per the locked decisions: only clean-create and
+   clobber-without-ask payloads dispatch. Interactive modes, --update
+   against an existing dest, backups, --debug (its stdout line is
+   computed during the copy), -f -v clobbers (the "removed" print),
+   and non-regular sources stay on the spine. */
+static bool
+dispatch_eligible(const struct chopin_options *x, const struct stat *src_sb,
+                  bool have_dst_sb, char *dst_backup)
+{
+    if (!S_ISREG(src_sb->st_mode))
+        return false;
+    if (x->debug || !x->data_copy_required)
+        return false;
+    if (dst_backup != NULL)
+        return false;
+    if (have_dst_sb
+        && (x->update != CHOPIN_UPDATE_ALL
+            || x->interactive == CHOPIN_I_ASK_USER
+            || (x->verbose && x->unlink_dest_after_failed_open)))
+        return false;
+    return true;
+}
+
 bool
 chopin_copy(const char *src_name, const char *dst_name,
             int dst_dirfd, const char *dst_relname,
@@ -817,6 +900,11 @@ copy_dir(const char *src_name_in, const char *dst_name_in,
     }
     free(names);
     *first_dir_created_per_command_line_arg = new_first_dir_created;
+
+    /* Per-directory join point (sprint 09B): every payload below this
+       directory completes and replays before the caller applies the
+       directory's own post-order metadata. */
+    ok &= chopin_parallel_barrier();
     return ok;
 }
 
@@ -834,6 +922,14 @@ copy_internal(const char *src_name, const char *dst_name,
     bool have_dst_sb = false;
 
     *copy_into_self = false;
+
+    /* Sprint 09: if either operand names a dest whose payload is
+       still in flight, drain first - the ladder must observe the
+       completed file exactly as serial execution would (multi-operand
+       collisions, and reading a dest an earlier operand just wrote). */
+    if (chopin_parallel_pending_path(src_name)
+        || chopin_parallel_pending_path(dst_name))
+        chopin_parallel_drain_keep();
 
     /* 2.1 item 2: stat source. */
     int fflags = should_dereference(x, command_line_arg)
@@ -1082,6 +1178,18 @@ after_labels:
         earlier_file = chopin_remember_copied(dst_name, src_sb.st_dev,
                                               src_sb.st_ino);
 
+    /* Hardlink follower whose primary payload is still in flight
+       (sprint 09B): followers never dispatch - drain, then
+       re-resolve. A failed primary was forgotten at its join, so the
+       re-lookup inserts THIS file as the new primary and it takes
+       the fresh-copy path, exactly GNU's failure behavior. */
+    if (earlier_file != NULL
+        && chopin_parallel_pending_path(earlier_file)) {
+        chopin_parallel_drain_keep();
+        earlier_file = chopin_remember_copied(dst_name, src_sb.st_dev,
+                                              src_sb.st_ino);
+    }
+
     /* Item 10 (2080-2143): earlier-file hits. Dir cases print the
        TOP-LEVEL names (quirk 19). */
     if (earlier_file != NULL && S_ISDIR(src_sb.st_mode)) {
@@ -1282,6 +1390,34 @@ after_labels:
         mode_t omitted = x->preserve_ownership
             ? (dst_mode_bits & (S_IRWXG | S_IRWXO)) : 0;
 
+        if (dispatch_eligible(x, &src_sb, have_dst_sb, dst_backup)
+            && (chopin_parallel_note_eligible(src_sb.st_size),
+                chopin_parallel_active())
+            && chopin_parallel_pair_ok(src_sb.st_dev, src_name)) {
+            struct reg_payload *p = chopin_xmalloc(sizeof *p);
+
+            p->src_name = chopin_xstrdup(src_name);
+            p->dst_name = chopin_xstrdup(dst_name);
+            p->rel_off = (size_t)(dst_relname - dst_name);
+            p->dst_dirfd = dst_dirfd;
+            p->x = x;
+            p->dst_mode = dst_mode_bits;
+            p->omitted = omitted;
+            p->new_dst = new_dst;
+            p->src_sb = src_sb;
+            p->record_dest = command_line_arg
+                && chopin_multi_source_active();
+            p->have_dst_sb_out = false;
+            chopin_parallel_dispatch(reg_payload_run, reg_payload_join,
+                                     p, p->dst_name);
+            /* Provisional success; the barrier ANDs the real result
+               into this batch's return and the join hook does the
+               tail bookkeeping. Nothing below the dispatch point
+               touches this file serially: no backup exists and
+               dest_record moved into the join. */
+            free(dst_backup);
+            return true;
+        }
         ok = copy_reg(src_name, dst_name, dst_dirfd, dst_relname, x,
                       dst_mode_bits, omitted, &new_dst, &src_sb);
     } else if (S_ISLNK(src_sb.st_mode)) {
