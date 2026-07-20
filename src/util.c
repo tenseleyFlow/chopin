@@ -113,14 +113,89 @@ chopin_try_help_and_die(void)
     exit(CHOPIN_STATUS_FAIL);
 }
 
+static _Thread_local struct chopin_errcap *thread_errcap;
+
+void
+chopin_error_capture(struct chopin_errcap *cap)
+{
+    thread_errcap = cap;
+}
+
+struct chopin_errcap *
+chopin_error_capture_current(void)
+{
+    return thread_errcap;
+}
+
+void
+chopin_errcap_flush(struct chopin_errcap *cap)
+{
+    if (cap != NULL && cap->len > 0) {
+        fwrite(cap->buf, 1, cap->len, stderr);
+        cap->len = 0;
+    }
+}
+
+static void
+cap_append(struct chopin_errcap *cap, const char *s, size_t n)
+{
+    if (cap->len + n + 1 > cap->cap) {
+        size_t want = (cap->len + n + 1) * 2;
+
+        if (want < 256)
+            want = 256;
+        cap->buf = chopin_xrealloc(cap->buf, want);
+        cap->cap = want;
+    }
+    memcpy(cap->buf + cap->len, s, n);
+    cap->len += n;
+    cap->buf[cap->len] = '\0';
+}
+
 static void
 verror(int errnum, const char *fmt, va_list ap)
 {
-    fprintf(stderr, "%s: ", chopin_prog);
-    vfprintf(stderr, fmt, ap);
-    if (errnum != 0)
-        fprintf(stderr, ": %s", strerror(errnum));
-    fputc('\n', stderr);
+    struct chopin_errcap *cap = thread_errcap;
+
+    if (cap == NULL) {
+        fprintf(stderr, "%s: ", chopin_prog);
+        vfprintf(stderr, fmt, ap);
+        if (errnum != 0)
+            fprintf(stderr, ": %s", strerror(errnum));
+        fputc('\n', stderr);
+        return;
+    }
+
+    /* Measure, then format - quoted path operands can be arbitrarily
+       long and truncation would break parallel==serial identity. */
+    char stackbody[512];
+    char *body = stackbody;
+    va_list aq;
+
+    va_copy(aq, ap);
+    int n = vsnprintf(stackbody, sizeof stackbody, fmt, aq);
+    va_end(aq);
+    if (n < 0)
+        n = 0;
+    if ((size_t)n >= sizeof stackbody) {
+        body = chopin_xmalloc((size_t)n + 1);
+        va_copy(aq, ap);
+        vsnprintf(body, (size_t)n + 1, fmt, aq);
+        va_end(aq);
+    }
+
+    cap_append(cap, chopin_prog, strlen(chopin_prog));
+    cap_append(cap, ": ", 2);
+    cap_append(cap, body, (size_t)n);
+    if (body != stackbody)
+        free(body);
+    if (errnum != 0) {
+        const char *es = strerror(errnum);
+
+        cap_append(cap, ": ", 2);
+        cap_append(cap, es, strlen(es));
+    }
+    cap_append(cap, "\n", 1);
 }
 
 void
@@ -136,6 +211,11 @@ _Noreturn void
 chopin_die(int errnum, const char *fmt, ...)
 {
     va_list ap;
+
+    /* A fatal error inside a capture window must still reach the
+       user: emit everything buffered so far, then the message. */
+    chopin_errcap_flush(thread_errcap);
+    chopin_error_capture(NULL);
     va_start(ap, fmt);
     verror(errnum, fmt, ap);
     va_end(ap);

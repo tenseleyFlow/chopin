@@ -31,20 +31,24 @@ chopin_set_char_quoting(struct chopin_qopts *o, char c, int on)
         *w &= ~bit;
 }
 
+/* Per-thread (sprint 09): pool workers format diagnostics with the
+   same quoting entry points; thread-local state keeps them race-free
+   without a lock in the hot path. chopin_quote_thread_cleanup frees a
+   worker's copies at pool teardown. */
+static _Thread_local signed char *iswprint_tab; /* iswprint + 1 */
+
 static int
 cached_iswprint(wchar_t wc)
 {
-    static signed char *tab;    /* iswprint + 1, 0 = unfilled */
-
     if ((unsigned long)wc >= 0x10000ul)
         return iswprint((wint_t)wc);
-    if (!tab) {
-        tab = chopin_xmalloc(0x10000);
-        memset(tab, 0, 0x10000);
+    if (!iswprint_tab) {
+        iswprint_tab = chopin_xmalloc(0x10000);
+        memset(iswprint_tab, 0, 0x10000);
     }
-    if (tab[wc] == 0)
-        tab[wc] = (signed char)(iswprint((wint_t)wc) ? 2 : 1);
-    return tab[wc] - 1;
+    if (iswprint_tab[wc] == 0)
+        iswprint_tab[wc] = (signed char)(iswprint((wint_t)wc) ? 2 : 1);
+    return iswprint_tab[wc] - 1;
 }
 
 /* gettext_quote reduced: no message catalogs; UTF-8 locales get curly
@@ -426,20 +430,32 @@ chopin_quotearg_buffer(char *buf, size_t bufsize, const char *arg,
 /* gnulib quotearg_n: independent growing slots. */
 #define N_SLOTS 4
 
+static _Thread_local char *slots[N_SLOTS];
+static _Thread_local size_t slot_caps[N_SLOTS];
+
 static const char *
 quote_slot(int n, const struct chopin_qopts *o, const char *arg)
 {
-    static char *slots[N_SLOTS];
-    static size_t caps[N_SLOTS];
-
-    size_t want = chopin_quotearg_buffer(slots[n], caps[n], arg,
+    size_t want = chopin_quotearg_buffer(slots[n], slot_caps[n], arg,
                                          (size_t)-1, o) + 1;
-    if (want > caps[n]) {
+    if (want > slot_caps[n]) {
         slots[n] = chopin_xrealloc(slots[n], want);
-        caps[n] = want;
-        chopin_quotearg_buffer(slots[n], caps[n], arg, (size_t)-1, o);
+        slot_caps[n] = want;
+        chopin_quotearg_buffer(slots[n], slot_caps[n], arg, (size_t)-1, o);
     }
     return slots[n];
+}
+
+void
+chopin_quote_thread_cleanup(void)
+{
+    for (int i = 0; i < N_SLOTS; i++) {
+        free(slots[i]);
+        slots[i] = NULL;
+        slot_caps[i] = 0;
+    }
+    free(iswprint_tab);
+    iswprint_tab = NULL;
 }
 
 const char *
@@ -460,8 +476,8 @@ chopin_quoteaf(const char *arg)
 const char *
 chopin_quotef(const char *arg)
 {
-    static struct chopin_qopts o;
-    static bool init;
+    static _Thread_local struct chopin_qopts o;
+    static _Thread_local bool init;
 
     if (!init) {
         o.style = CHOPIN_QS_SHELL_ESCAPE;

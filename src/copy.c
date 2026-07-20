@@ -60,6 +60,20 @@ struct dir_list {
 static const char *top_level_src_name;
 static const char *top_level_dst_name;
 
+/* Primed by chopin_copy_init before any pool worker exists: lazy
+   first-use initialization would be a data race under the pool. */
+static int verify_enabled;
+
+void
+chopin_copy_init(void)
+{
+    const char *e = getenv("CHOPIN_DEBUG_VERIFY");
+
+    verify_enabled = e != NULL && *e != '\0' && *e != '0';
+    chopin_copydata_init();
+    (void)chopin_cached_umask();
+}
+
 static bool copy_internal(const char *src_name, const char *dst_name,
                           int dst_dirfd, const char *dst_relname,
                           int nonexistent_dst,
@@ -620,13 +634,7 @@ copy_reg(const char *src_name, const char *dst_name,
        the destination against the source byte-for-byte after ANY
        engine, plus a sparseness-class sanity bound. */
     if (return_val) {
-        static int verify = -1;
-
-        if (verify < 0) {
-            const char *e = getenv("CHOPIN_DEBUG_VERIFY");
-            verify = e != NULL && *e != '\0' && *e != '0';
-        }
-        if (verify) {
+        if (verify_enabled) {
             struct stat vsb;
 
             if (fstat(dest_desc, &vsb) != 0) {
@@ -648,17 +656,21 @@ copy_reg(const char *src_name, const char *dst_name,
                                (unsigned)got, chopin_quoteaf(dst_name));
             }
             /* v2: content re-read after ANY engine. dest_desc is
-               write-only; re-open by name for reading. */
+               write-only; re-open by name for reading. Buffers are
+               heap-per-call: verify is a debug oracle and may run on
+               any pool worker (no shared statics). */
             if (x->data_copy_required && S_ISREG(src_open_sb.st_mode)) {
-                static char vs[65536], vd[65536];
+                enum { VBUF = 65536 };
+                char *vs = chopin_xmalloc(2 * VBUF);
+                char *vd = vs + VBUF;
                 int vfd = openat(dst_dirfd, dst_relname, O_RDONLY);
 
                 if (vfd < 0 || lseek(source_desc, 0, SEEK_SET) != 0)
                     chopin_die(errno, "VERIFY: cannot reopen %s",
                                chopin_quoteaf(dst_name));
                 for (;;) {
-                    ssize_t ns = read(source_desc, vs, sizeof vs);
-                    ssize_t nd = read(vfd, vd, sizeof vd);
+                    ssize_t ns = read(source_desc, vs, VBUF);
+                    ssize_t nd = read(vfd, vd, VBUF);
 
                     if (ns < 0 || nd < 0)
                         chopin_die(errno, "VERIFY: re-read failed on %s",
@@ -670,6 +682,7 @@ copy_reg(const char *src_name, const char *dst_name,
                         break;
                 }
                 close(vfd);
+                free(vs);
                 /* Sparseness sanity: the dest never occupies more
                    blocks than data + fs slack when holes were asked
                    for on a sparse source. */

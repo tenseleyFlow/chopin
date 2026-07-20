@@ -41,4 +41,8 @@ const char *chopin_quoteaf(const char *arg);
 const char *chopin_quoteaf_n(int n, const char *arg);
 const char *chopin_quotef(const char *arg);
 
+/* Sprint 09: the slots are per-thread so pool workers can format
+   diagnostics; free a worker's copies at pool teardown. */
+void chopin_quote_thread_cleanup(void);
+
 #endif

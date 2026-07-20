@@ -2,7 +2,10 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -68,8 +71,12 @@ buffer_lcm(size_t a, size_t b)
     return x * b;
 }
 
-static char *buf;
-static size_t buf_cap;
+/* The persistent aligned copy buffer is per-thread (sprint 09): each
+   pool worker reuses its own across payloads; the spine keeps its own
+   for serial files. chopin_copydata_thread_cleanup frees a worker's
+   at pool teardown. */
+static _Thread_local char *buf;
+static _Thread_local size_t buf_cap;
 
 static char *
 get_buffer(size_t want)
@@ -87,6 +94,14 @@ get_buffer(size_t want)
     return buf;
 }
 
+void
+chopin_copydata_thread_cleanup(void)
+{
+    free(buf);
+    buf = NULL;
+    buf_cap = 0;
+}
+
 /* FICLONE probe cache (overview s5): first failure per
    (src_dev, dst_dev) pair memoizes "unsupported" so non-CoW pairs
    pay one failed ioctl per RUN, not per file. Never invalidated
@@ -100,14 +115,19 @@ get_buffer(size_t want)
 #include <sys/clonefile.h>
 #endif
 
-static unsigned long clone_probes;
-static unsigned long cache_hits;
+/* Shared across pool workers: counters are atomic and the failed-pair
+   memo is mutex-guarded (the lock is taken once per clone ATTEMPT,
+   never on the read/write data path). */
+static _Atomic unsigned long clone_probes;
+static _Atomic unsigned long cache_hits;
+static int stats_enabled;   /* primed by chopin_copydata_init */
 
 #if CHOPIN_HAVE_FICLONE
 struct dev_pair {
     dev_t src;
     dev_t dst;
 };
+static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct dev_pair *failed_pairs;
 static size_t n_failed;
 static size_t cap_failed;
@@ -115,15 +135,27 @@ static size_t cap_failed;
 static bool
 pair_failed(dev_t src, dev_t dst)
 {
+    bool hit = false;
+
+    pthread_mutex_lock(&cache_lock);
     for (size_t i = 0; i < n_failed; i++)
-        if (failed_pairs[i].src == src && failed_pairs[i].dst == dst)
-            return true;
-    return false;
+        if (failed_pairs[i].src == src && failed_pairs[i].dst == dst) {
+            hit = true;
+            break;
+        }
+    pthread_mutex_unlock(&cache_lock);
+    return hit;
 }
 
 static void
 remember_failed_pair(dev_t src, dev_t dst)
 {
+    pthread_mutex_lock(&cache_lock);
+    for (size_t i = 0; i < n_failed; i++)
+        if (failed_pairs[i].src == src && failed_pairs[i].dst == dst) {
+            pthread_mutex_unlock(&cache_lock);
+            return;
+        }
     if (n_failed == cap_failed) {
         cap_failed = cap_failed ? cap_failed * 2 : 8;
         failed_pairs = chopin_xrealloc(failed_pairs,
@@ -133,6 +165,7 @@ remember_failed_pair(dev_t src, dev_t dst)
     failed_pairs[n_failed].src = src;
     failed_pairs[n_failed].dst = dst;
     n_failed++;
+    pthread_mutex_unlock(&cache_lock);
 }
 #endif
 
@@ -140,21 +173,25 @@ static void
 stats_atexit(void)
 {
     fprintf(stderr, "chopin stats: ficlone probes=%lu cache_hits=%lu\n",
-            clone_probes, cache_hits);
+            atomic_load(&clone_probes), atomic_load(&cache_hits));
+}
+
+/* Called from main before any worker exists: primes lazy state that
+   would otherwise be a first-use race under the pool. */
+void
+chopin_copydata_init(void)
+{
+    const char *e = getenv("CHOPIN_DEBUG_STATS");
+
+    stats_enabled = e != NULL && *e != '\0' && *e != '0';
+    if (stats_enabled)
+        atexit(stats_atexit);
 }
 
 int
 chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, bool new_dst,
                   const struct chopin_options *x)
 {
-    static int stats = -1;
-
-    if (stats < 0) {
-        const char *e = getenv("CHOPIN_DEBUG_STATS");
-        stats = e != NULL && *e != '\0' && *e != '0';
-        if (stats)
-            atexit(stats_atexit);
-    }
     (void)new_dst;
 
 #if CHOPIN_HAVE_FICLONE
@@ -164,10 +201,10 @@ chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, bool new_dst,
         return errno;
     if (x->reflink_mode != CHOPIN_REFLINK_ALWAYS
         && pair_failed(src_dev, dsb.st_dev)) {
-        cache_hits++;
+        atomic_fetch_add(&cache_hits, 1);
         return -1;
     }
-    clone_probes++;
+    atomic_fetch_add(&clone_probes, 1);
     if (ioctl(dest_fd, FICLONE, src_fd) == 0)
         return 0;
     int err = errno;

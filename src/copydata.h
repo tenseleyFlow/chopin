@@ -36,4 +36,9 @@ bool chopin_copy_file_data(int src_fd, const struct stat *src_sb,
 int chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev,
                       bool new_dst, const struct chopin_options *x);
 
+/* Sprint 09: prime lazy state before any pool worker exists; free a
+   worker thread's persistent copy buffer at pool teardown. */
+void chopin_copydata_init(void);
+void chopin_copydata_thread_cleanup(void);
+
 #endif

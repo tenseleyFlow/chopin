@@ -10,6 +10,10 @@
    (dst_dirfd, dst_relname) exactly as GNU does; dst_name is the full
    name for diagnostics. nonexistent_dst < 0 means "known absent
    except possibly as a dangling symlink" (skips the dst stat). */
+/* Prime lazy state (verify flag, stats flag, umask cache) before any
+   pool worker exists - sprint 09. */
+void chopin_copy_init(void);
+
 bool chopin_copy(const char *src_name, const char *dst_name,
                  int dst_dirfd, const char *dst_relname,
                  int nonexistent_dst, const struct chopin_options *x,

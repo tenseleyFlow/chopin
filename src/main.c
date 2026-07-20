@@ -590,6 +590,7 @@ main(int argc, char **argv)
 
     chopin_parse_args(argc, argv, &inv);
     chopin_options_resolve(&inv);
+    chopin_copy_init();
 
     const char *dbg = getenv("CHOPIN_DEBUG_OPTIONS");
     bool debug_options = dbg != NULL && *dbg != '\0' && *dbg != '0';

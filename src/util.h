@@ -37,6 +37,23 @@ _Noreturn void chopin_try_help_and_die(void);
 void chopin_error(int errnum, const char *fmt, ...) CHOPIN_PRINTF(2, 3);
 _Noreturn void chopin_die(int errnum, const char *fmt, ...) CHOPIN_PRINTF(2, 3);
 
+/* Diagnostic capture (sprint 09): while a capture is installed on the
+   CALLING thread, chopin_error appends formatted lines to it instead
+   of stderr. Workers capture into their result slot; the spine
+   captures into ordered sync slots while a batch is in flight, so
+   stderr replays in traversal order at barriers. chopin_die flushes
+   the thread's capture to stderr before exiting - fatal oracle aborts
+   stay loud and ordered. */
+struct chopin_errcap {
+    char *buf;
+    size_t len;
+    size_t cap;
+};
+
+void chopin_error_capture(struct chopin_errcap *cap);   /* NULL = direct */
+struct chopin_errcap *chopin_error_capture_current(void);
+void chopin_errcap_flush(struct chopin_errcap *cap);    /* to stderr */
+
 void *chopin_xmalloc(size_t n);
 void *chopin_xrealloc(void *p, size_t n);
 char *chopin_xstrdup(const char *s);
