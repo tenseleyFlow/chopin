@@ -154,5 +154,24 @@ for s in $scripts; do
 done
 
 echo "gnu-mined: $mined mined, $deviation deviation-documented, $deferred deferred, $skipped skipped, $failed failed"
+
+# 08D completeness: the DISPOSITION file must cover EXACTLY the corpus
+# - no script unaccounted, no phantom entry. A new coreutils release
+# adding a cp test trips this until dispositioned.
+disp="$root/tests/gnu-mined/DISPOSITION"
+ls "$corpus"/*.sh 2>/dev/null | xargs -n1 basename \
+    | sed 's/\.sh$//' | sort > "$work/corpus.names"
+grep -vE '^#|^$' "$disp" | awk '{print $1}' | sort > "$work/disp.names"
+missing=$(comm -23 "$work/corpus.names" "$work/disp.names")
+phantom=$(comm -13 "$work/corpus.names" "$work/disp.names")
+if [ -n "$missing" ] || [ -n "$phantom" ]; then
+    echo "gnu-mined: DISPOSITION drift:" >&2
+    [ -n "$missing" ] && echo "  undispositioned: $missing" >&2
+    [ -n "$phantom" ] && echo "  phantom entries: $phantom" >&2
+    failed=$((failed + 1))
+else
+    echo "gnu-mined: DISPOSITION covers all $(grep -c . "$work/corpus.names") scripts"
+fi
+
 [ "$failed" -eq 0 ] || exit 1
 exit 0

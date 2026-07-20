@@ -1,0 +1,86 @@
+# GNU tests/cp disposition (66 scripts). Every script has a verdict;
+# the mined runner asserts this file covers exactly the corpus
+# (sprint 08D). Columns: <script> <verdict> <reason>
+#
+# Verdicts:
+#   mined      runs against chopin unmodified and passes (or defers to
+#              a documented register deviation)
+#   skip-root  needs privileges; the harness refuses root
+#   skip-sel   needs an SELinux-enabled kernel (build-parity: chopin
+#              and the pinned oracle are both non-SELinux)
+#   skip-acl   needs setfacl/getfacl (build-parity: ACL-disabled
+#              oracle; cp-visible ACL-xattr travel is golden-covered)
+#   skip-mv    exercises mv, excluded from cp v0.1 (non-goal)
+#   skip-fs    needs a second filesystem / special mount (runs on the
+#              fs-job lane where CHOPIN_TEST_FSROOT is set)
+#   skip-env   needs a tool absent by default (valgrind, perl) - runs
+#              where present
+#   port       encodes GNU-internal assumptions; covered by a golden
+#              port instead of the script
+
+abuse                port      internal-argv-abuse covered by unit err-lane
+acl                  skip-acl  setfacl vs ACL-disabled oracle
+attr-existing        mined     xattr on existing dest
+backup-1             mined
+backup-dir           skip-mv   mv backup halves
+backup-is-src        mined     documented DEV-001 deviation
+capability           skip-root setcap
+copy-FMR             skip-env  valgrind + perl
+cp-a-selinux         skip-sel  selinux + mv
+cp-deref             mined
+cp-HL                mined
+cp-i                 mined
+cp-mv-backup         mined     cp half
+cp-mv-enotsup-xattr  skip-mv   mv + root xattr
+cp-parents           mined
+cross-dev-symlink    skip-fs   needs a second filesystem
+debug                mined
+deref-slink          mined
+dir-rm-dest          mined
+dir-slash            mined
+dir-vs-file          mined
+existing-perm-dir    mined
+existing-perm-race   port      TOCTOU race; not deterministically minable
+fail-perm            mined     (skip-root inside; harness runs non-root)
+file-perm-race       port      TOCTOU race
+into-self            mined
+keep-directory-symlink mined
+link-deref           mined
+link-heap            skip-env  ulimit -v deep trees (flaky under CI)
+link-no-deref        mined
+link-preserve        mined
+link                 mined
+link-symlink         mined
+nfs-removal-race     port      NFS-specific race
+no-ctx               skip-sel  selinux context
+no-deref-link1       mined
+no-deref-link2       mined
+no-deref-link3       mined
+non-utf8-name        mined
+parent-perm-race     port      TOCTOU race
+parent-perm          mined
+perm                 skip-mv   mv permission halves
+preserve-2           mined
+preserve-gid         skip-root chown to another group
+preserve-link        mined
+preserve-mode        mined
+preserve-slink-time  mined
+proc-short-read      mined
+proc-zero-len        mined
+readonly-dir         mined
+reflink-auto         skip-fs   needs a CoW second filesystem
+reflink-perm         mined
+r-vs-symlink         mined
+same-file            mined
+slink-2-slink        mined
+sparse-2             mined
+sparse-extents-2     skip-root loop-device mkfs
+sparse-extents       mined
+sparse-perf          port      timing assertion, not a parity check
+sparse               mined
+sparse-to-pipe       mined
+special-bits         skip-root setuid preservation as root
+special-f            mined
+src-base-dot         mined
+symlink-slash        mined
+thru-dangling        mined
