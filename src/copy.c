@@ -265,11 +265,12 @@ source_is_dst_backup(const char *srcbase, const struct stat *src_st,
           && strcmp(srcbase + dstbaselen, suffix) == 0))
         return false;
 
-    char *dst_back = chopin_xmalloc(strlen(dst_relname) + suffixlen + 1);
+    size_t bsize = strlen(dst_relname) + suffixlen + 1;
+    char *dst_back = chopin_xmalloc(bsize);
     struct stat dst_back_sb;
     int st;
 
-    sprintf(dst_back, "%s%s", dst_relname, suffix);
+    snprintf(dst_back, bsize, "%s%s", dst_relname, suffix);
     st = fstatat(dst_dirfd, dst_back, &dst_back_sb, 0);
     free(dst_back);
     return st == 0 && SAME_INODE(*src_st, dst_back_sb);

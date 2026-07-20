@@ -143,8 +143,9 @@ numbered_backup_name(int dirfd, const char *file, bool *numbered_exists)
     }
 
     size_t flen = strlen(file);
-    char *name = chopin_xmalloc(flen + 2 + strlen(version) + 2);
-    sprintf(name, "%s.~%s~", file, version);
+    size_t nsize = flen + 2 + strlen(version) + 2;
+    char *name = chopin_xmalloc(nsize);
+    snprintf(name, nsize, "%s.~%s~", file, version);
     free(version);
     return name;
 }
