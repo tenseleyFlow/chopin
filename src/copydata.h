@@ -41,4 +41,8 @@ int chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev,
 void chopin_copydata_init(void);
 void chopin_copydata_thread_cleanup(void);
 
+/* Sprint 09 chunked dispatch: true when a clone attempt on this
+   device pair is certain to fail (memoized or impossible). */
+bool chopin_clone_pair_known_unsupported(dev_t src, dev_t dst);
+
 #endif

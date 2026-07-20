@@ -2,6 +2,8 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -64,6 +66,7 @@ static const char *top_level_dst_name;
 /* Primed by chopin_copy_init before any pool worker exists: lazy
    first-use initialization would be a data race under the pool. */
 static int verify_enabled;
+static void chopin_copy_chunks_init(void);
 
 void
 chopin_copy_init(void)
@@ -72,6 +75,7 @@ chopin_copy_init(void)
 
     verify_enabled = e != NULL && *e != '\0' && *e != '0';
     chopin_copydata_init();
+    chopin_copy_chunks_init();
     (void)chopin_cached_umask();
 }
 
@@ -774,6 +778,317 @@ reg_payload_join(void *arg, bool ok)
     free(p);
 }
 
+/* ---- Chunked large-file dispatch (sprint 09B, DEFAULT OFF) --------
+   CHOPIN_PARALLEL_CHUNKS=1 enables; sprint 10 measures chunked vs
+   serial copy_file_range on the large-single lane before any default
+   flip. Files >= CHOPIN_CHUNK_THRESHOLD (default 64 MiB) on
+   parallel-classed pairs split into disjoint-offset pread/pwrite
+   payloads over one shared fd pair with a refcounted close (wcp's
+   pattern): ftruncate-to-size up front, ftruncate-back to the lowest
+   failed offset on failure so partial-failure trees stay GNU-shaped.
+   Restricted to CLEAN CREATES of dense sources whose device pair is
+   memoized clone-unsupported: no open-ladder or reflink subtleties
+   ride along, and exactly one diagnostic (the lowest-offset failure)
+   reaches the slot stream - identity with serial holds. The LAST
+   chunk to finish runs the metadata tail, the verify oracle, and the
+   dest_info backfill; joins are idempotent through the control
+   block. */
+struct chunk_ctl {
+    int src_fd;
+    int dst_fd;
+    char *src_name;
+    char *dst_name;
+    size_t rel_off;
+    int dst_dirfd;
+    const struct chopin_options *x;
+    mode_t dst_mode;
+    mode_t omitted;
+    struct stat src_sb;
+    bool record_dest;
+    _Atomic int refs;           /* chunks still running */
+    pthread_mutex_t lock;       /* failure record */
+    bool failed;
+    off_t fail_off;             /* lowest failing offset */
+    int fail_errno;
+    bool fail_on_read;
+    bool final_ok;              /* set by the finisher */
+    bool joined;                /* first join does the bookkeeping */
+    int join_refs;              /* frees at the last join */
+    bool have_dst_sb_out;
+    struct stat dst_sb_out;
+};
+
+struct chunk_payload {
+    struct chunk_ctl *ctl;
+    off_t off;
+    off_t len;
+};
+
+static void
+chunk_record_failure(struct chunk_ctl *ctl, off_t off, int err,
+                     bool on_read)
+{
+    pthread_mutex_lock(&ctl->lock);
+    if (!ctl->failed || off < ctl->fail_off) {
+        ctl->failed = true;
+        ctl->fail_off = off;
+        ctl->fail_errno = err;
+        ctl->fail_on_read = on_read;
+    }
+    pthread_mutex_unlock(&ctl->lock);
+}
+
+static bool
+chunk_finish(struct chunk_ctl *ctl)
+{
+    const struct chopin_options *x = ctl->x;
+    bool ok = true;
+
+    if (ctl->failed) {
+        /* One diagnostic, at the serial failure point. */
+        if (ctl->fail_on_read)
+            chopin_error(ctl->fail_errno, "error reading %s",
+                         chopin_quoteaf(ctl->src_name));
+        else
+            chopin_error(ctl->fail_errno, "error writing %s",
+                         chopin_quoteaf(ctl->dst_name));
+        if (ftruncate(ctl->dst_fd, ctl->fail_off) != 0) { /* GNU-shaped */
+            chopin_error(errno, "failed to extend %s",
+                         chopin_quoteaf(ctl->dst_name));
+        }
+        ok = false;
+    } else {
+        if (!chopin_apply_meta_fd(ctl->src_fd, ctl->src_name,
+                                  ctl->dst_fd, ctl->dst_name,
+                                  &ctl->src_sb, NULL, true,
+                                  ctl->dst_mode, ctl->omitted, 0, x))
+            ok = false;
+        if (ok && verify_enabled) {
+            enum { VBUF = 65536 };
+            char *vs = chopin_xmalloc(2 * VBUF);
+            char *vd = vs + VBUF;
+            off_t pos = 0;
+            /* The dst fd is write-only; verify needs its own. */
+            int vfd = openat(ctl->dst_dirfd,
+                             ctl->dst_name + ctl->rel_off, O_RDONLY);
+
+            if (vfd < 0)
+                chopin_die(errno, "VERIFY: cannot reopen %s",
+                           chopin_quoteaf(ctl->dst_name));
+            for (;;) {
+                ssize_t ns = pread(ctl->src_fd, vs, VBUF, pos);
+                ssize_t nd = pread(vfd, vd, VBUF, pos);
+
+                if (ns < 0 || nd < 0)
+                    chopin_die(errno, "VERIFY: re-read failed on %s",
+                               chopin_quoteaf(ctl->dst_name));
+                if (ns != nd || memcmp(vs, vd, (size_t)ns) != 0)
+                    chopin_die(0, "VERIFY: content mismatch on %s",
+                               chopin_quoteaf(ctl->dst_name));
+                if (ns == 0)
+                    break;
+                pos += ns;
+            }
+            close(vfd);
+            free(vs);
+        }
+        if (ok && ctl->record_dest
+            && fstatat(ctl->dst_dirfd, ctl->dst_name + ctl->rel_off,
+                       &ctl->dst_sb_out, AT_SYMLINK_NOFOLLOW) == 0)
+            ctl->have_dst_sb_out = true;
+    }
+
+    if (close(ctl->dst_fd) < 0) {
+        chopin_error(errno, "failed to close %s",
+                     chopin_quoteaf(ctl->dst_name));
+        ok = false;
+    }
+    if (close(ctl->src_fd) < 0) {
+        chopin_error(errno, "failed to close %s",
+                     chopin_quoteaf(ctl->src_name));
+        ok = false;
+    }
+    ctl->final_ok = ok;
+    return ok;
+}
+
+static bool
+chunk_payload_run(void *arg)
+{
+    struct chunk_payload *c = arg;
+    struct chunk_ctl *ctl = c->ctl;
+    enum { CBUF = 1 << 20 };
+    char *cbuf = chopin_xmalloc(CBUF);
+    off_t pos = c->off;
+    off_t end = c->off + c->len;
+
+    while (pos < end) {
+        size_t want = (size_t)(end - pos) < (size_t)CBUF
+            ? (size_t)(end - pos) : (size_t)CBUF;
+        ssize_t n = pread(ctl->src_fd, cbuf, want, pos);
+
+        if (n < 0) {
+            chunk_record_failure(ctl, pos, errno, true);
+            break;
+        }
+        if (n == 0)
+            break;      /* shrank underneath us; not a chunk error */
+
+        ssize_t written = 0;
+
+        while (written < n) {
+            ssize_t w = pwrite(ctl->dst_fd, cbuf + written,
+                               (size_t)(n - written), pos + written);
+
+            if (w < 0) {
+                chunk_record_failure(ctl, pos + written, errno, false);
+                goto out;
+            }
+            written += w;
+        }
+        pos += n;
+    }
+out:
+    free(cbuf);
+    if (atomic_fetch_sub(&ctl->refs, 1) == 1)
+        return chunk_finish(ctl);   /* the finisher carries the verdict */
+    return true;
+}
+
+static void
+chunk_payload_join(void *arg, bool ok)
+{
+    struct chunk_payload *c = arg;
+    struct chunk_ctl *ctl = c->ctl;
+
+    (void)ok;
+    if (!ctl->joined) {
+        ctl->joined = true;
+        if (!ctl->final_ok)
+            chopin_forget_created(ctl->src_sb.st_dev, ctl->src_sb.st_ino);
+        if (ctl->final_ok && ctl->record_dest && ctl->have_dst_sb_out)
+            chopin_dest_record(ctl->dst_name + ctl->rel_off,
+                               &ctl->dst_sb_out);
+    }
+    free(c);
+    if (--ctl->join_refs == 0) {
+        pthread_mutex_destroy(&ctl->lock);
+        free(ctl->src_name);
+        free(ctl->dst_name);
+        free(ctl);
+    }
+}
+
+static bool chunks_enabled_flag;
+static off_t chunk_threshold = 64 << 20;
+
+static void
+chopin_copy_chunks_init(void)
+{
+    const char *e = getenv("CHOPIN_PARALLEL_CHUNKS");
+
+    chunks_enabled_flag = e != NULL && *e != '\0' && *e != '0';
+    e = getenv("CHOPIN_CHUNK_THRESHOLD");
+    if (e != NULL && *e != '\0') {
+        long long v = strtoll(e, NULL, 10);
+
+        if (v >= 65536)
+            chunk_threshold = (off_t)v;
+    }
+}
+
+/* Try to dispatch src as disjoint-offset chunks. Returns true if the
+   file was taken (payloads dispatched); false = use the normal path.
+   Restricted to clean creates of dense regulars on
+   clone-unsupported pairs. */
+static bool
+try_chunk_dispatch(const char *src_name, const char *dst_name,
+                   int dst_dirfd, const char *dst_relname,
+                   const struct chopin_options *x, mode_t dst_mode,
+                   mode_t omitted, bool new_dst,
+                   const struct stat *src_sb, bool record_dest)
+{
+    if (!chunks_enabled_flag || !new_dst
+        || src_sb->st_size < chunk_threshold
+        || x->sparse_mode == CHOPIN_SPARSE_ALWAYS
+        || (intmax_t)src_sb->st_blocks * 512 < src_sb->st_size)
+        return false;
+
+    int sfd = open(src_name, O_RDONLY);
+
+    if (sfd < 0)
+        return false;   /* the normal path will diagnose */
+
+    struct stat open_sb;
+    struct stat dparent;
+    int drc = dst_dirfd == AT_FDCWD
+        ? stat(".", &dparent) : fstat(dst_dirfd, &dparent);
+
+    if (fstat(sfd, &open_sb) != 0 || !SAME_INODE(*src_sb, open_sb)
+        || drc != 0
+        || (x->reflink_mode != CHOPIN_REFLINK_NEVER
+            && !chopin_clone_pair_known_unsupported(open_sb.st_dev,
+                                                    dparent.st_dev))) {
+        close(sfd);
+        return false;
+    }
+
+    mode_t open_mode = (dst_mode & ~omitted)
+        | (x->preserve_xattr && geteuid() != 0 ? S_IWUSR : 0);
+    int dfd = openat(dst_dirfd, dst_relname,
+                     O_WRONLY | O_CREAT | O_EXCL, open_mode);
+
+    if (dfd < 0) {
+        close(sfd);
+        return false;   /* dangling symlinks etc: the ladder handles */
+    }
+    if (ftruncate(dfd, src_sb->st_size) != 0) {
+        close(dfd);
+        close(sfd);
+        unlinkat(dst_dirfd, dst_relname, 0);
+        return false;
+    }
+
+    struct chunk_ctl *ctl = chopin_xmalloc(sizeof *ctl);
+
+    memset(ctl, 0, sizeof *ctl);
+    ctl->src_fd = sfd;
+    ctl->dst_fd = dfd;
+    ctl->src_name = chopin_xstrdup(src_name);
+    ctl->dst_name = chopin_xstrdup(dst_name);
+    ctl->rel_off = (size_t)(dst_relname - dst_name);
+    ctl->dst_dirfd = dst_dirfd;
+    ctl->x = x;
+    ctl->dst_mode = dst_mode;
+    ctl->omitted = omitted;
+    ctl->src_sb = open_sb;
+    ctl->record_dest = record_dest;
+    pthread_mutex_init(&ctl->lock, NULL);
+
+    off_t chunk = 16 << 20;
+    int n = (int)((src_sb->st_size + chunk - 1) / chunk);
+
+    if (n < 1)
+        n = 1;
+    if (n > 64)
+        n = 64;
+    chunk = (src_sb->st_size + n - 1) / n;
+    atomic_store(&ctl->refs, n);
+    ctl->join_refs = n;
+
+    for (int i = 0; i < n; i++) {
+        struct chunk_payload *c = chopin_xmalloc(sizeof *c);
+
+        c->ctl = ctl;
+        c->off = (off_t)i * chunk;
+        c->len = c->off + chunk <= src_sb->st_size
+            ? chunk : src_sb->st_size - c->off;
+        chopin_parallel_dispatch(chunk_payload_run, chunk_payload_join,
+                                 c, ctl->dst_name);
+    }
+    return true;
+}
+
 /* Eligibility per the locked decisions: only clean-create and
    clobber-without-ask payloads dispatch. Interactive modes, --update
    against an existing dest, backups, --debug (its stdout line is
@@ -1394,6 +1709,15 @@ after_labels:
             && (chopin_parallel_note_eligible(src_sb.st_size),
                 chopin_parallel_active())
             && chopin_parallel_pair_ok(src_sb.st_dev, src_name)) {
+            bool rec = command_line_arg && chopin_multi_source_active();
+
+            if (try_chunk_dispatch(src_name, dst_name, dst_dirfd,
+                                   dst_relname, x, dst_mode_bits,
+                                   omitted, new_dst, &src_sb, rec)) {
+                free(dst_backup);
+                return true;
+            }
+
             struct reg_payload *p = chopin_xmalloc(sizeof *p);
 
             p->src_name = chopin_xstrdup(src_name);
@@ -1405,8 +1729,7 @@ after_labels:
             p->omitted = omitted;
             p->new_dst = new_dst;
             p->src_sb = src_sb;
-            p->record_dest = command_line_arg
-                && chopin_multi_source_active();
+            p->record_dest = rec;
             p->have_dst_sb_out = false;
             chopin_parallel_dispatch(reg_payload_run, reg_payload_join,
                                      p, p->dst_name);

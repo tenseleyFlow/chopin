@@ -188,6 +188,22 @@ chopin_copydata_init(void)
         atexit(stats_atexit);
 }
 
+/* Chunk eligibility asks: would a clone attempt certainly fail?
+   True when the pair is memoized-unsupported (or the platform cannot
+   clone at all), so chunked payloads never race a would-have-cloned
+   file. */
+bool
+chopin_clone_pair_known_unsupported(dev_t src, dev_t dst)
+{
+#if CHOPIN_HAVE_FICLONE
+    return pair_failed(src, dst);
+#else
+    (void)src;
+    (void)dst;
+    return true;
+#endif
+}
+
 int
 chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, bool new_dst,
                   const struct chopin_options *x)
