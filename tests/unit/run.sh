@@ -44,6 +44,19 @@ else
     note "ok: skeleton refuses copy with exit 1"
 fi
 
+# --- Option-surface tables (sprint 01): resolution orderings,
+# argmatch matrix, operand shapes, via the CHOPIN_DEBUG_OPTIONS dump.
+cc_bin=$(sed -n 's/^CC ?= //p' config.mk)
+extra=$(sed -n 's/^EXTRA_CPPFLAGS = //p' config.mk)
+mkdir -p build
+if ! "$cc_bin" -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 $extra \
+    -I. -Wall -Wextra -Werror -Wno-missing-field-initializers \
+    -o build/opts_driver-unittest tests/unit/opts_driver.c; then
+    bad "opts_driver does not compile -Werror clean"
+else
+    build/opts_driver-unittest || bad "option-surface tables failed"
+fi
+
 # --- Manifest tool: build with the strict flag set, then self-test.
 # Compiles to its OWN artifact (build/manifest-unittest): build/manifest
 # belongs to the Makefile and the golden tier may be executing it right
