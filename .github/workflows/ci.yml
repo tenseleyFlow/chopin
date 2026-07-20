@@ -78,6 +78,44 @@ jobs:
             gmake
             gmake check
 
+  # Loopback filesystem matrix (sprint 04D): btrfs + XFS-reflink give
+  # the sprint 07 reflink lanes and a real cross-device boundary for
+  # sprint 05 EXDEV cases; the size-bounded ext4 is sprint 08's ENOSPC
+  # lane. Mount roots are registered with the harness containment
+  # checker via CHOPIN_TEST_FSROOT. Skips gracefully off-Linux.
+  filesystems:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install tools
+        run: sudo apt-get update && sudo apt-get install -y \
+             libattr1-dev attr btrfs-progs xfsprogs
+      - name: create loopback mounts
+        run: |
+          sudo mkdir -p /mnt/chopin-btrfs /mnt/chopin-xfs /mnt/chopin-small
+          truncate -s 512M /tmp/btrfs.img /tmp/xfs.img
+          truncate -s 16M /tmp/small.img
+          sudo mkfs.btrfs -q /tmp/btrfs.img
+          sudo mkfs.xfs -q -m reflink=1 /tmp/xfs.img
+          sudo mkfs.ext4 -q /tmp/small.img
+          sudo mount -o loop /tmp/btrfs.img /mnt/chopin-btrfs
+          sudo mount -o loop /tmp/xfs.img /mnt/chopin-xfs
+          sudo mount -o loop /tmp/small.img /mnt/chopin-small
+          sudo chown "$(id -u):$(id -g)" /mnt/chopin-btrfs \
+              /mnt/chopin-xfs /mnt/chopin-small
+      - name: cache pinned oracle
+        uses: actions/cache@v4
+        with:
+          path: build/gnu-cp
+          key: gnu-cp-9.11-Linux-v1
+      - run: sh scripts/build-gnu-cp.sh
+      - run: ./configure
+      - run: make
+      - name: check with fs roots registered
+        run: |
+          CHOPIN_TEST_FSROOT="/mnt/chopin-btrfs /mnt/chopin-xfs /mnt/chopin-small" \
+            make check
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, alpine, freebsd]

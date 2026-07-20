@@ -38,8 +38,20 @@ rm -rf "$work"
 mkdir -p "$work"
 trap 'chmod -R u+rwx "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
-# Mined set for sprint 03 (sandbox-safe, no root/SELinux/mv, no -R).
-scripts="backup-1 backup-is-src cp-mv-backup"
+# Mined set (sandbox-safe, no root/SELinux/mv, no -R yet).
+scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl"
+
+# script -> sprint whose machinery it waits for (DEFER, not failure).
+deferred_until() {
+    case "$1" in
+    preserve-mode) echo "06" ;;   # uses cp -r mid-script
+    acl) echo "06" ;;             # setfacl vs the ACL-disabled oracle;
+                                  # xattr-parity behavior is golden-
+                                  # covered (meta-xattr); revisit with
+                                  # the fs job lanes
+    *) echo "" ;;
+    esac
+}
 
 # script -> register ID whose fix legitimately fails it.
 expected_deviation() {
@@ -73,7 +85,14 @@ deviation=0
 skipped=0
 failed=0
 
+deferred=0
 for s in $scripts; do
+    d=$(deferred_until "$s")
+    if [ -n "$d" ]; then
+        echo "DEFER $s (sprint $d)"
+        deferred=$((deferred + 1))
+        continue
+    fi
     orc=$(run_script "$s" "$oracle" oracle)
     crc=$(run_script "$s" "$root/chopin" chopin)
 
@@ -104,6 +123,6 @@ for s in $scripts; do
     fi
 done
 
-echo "gnu-mined: $mined mined, $deviation deviation-documented, $skipped skipped, $failed failed"
+echo "gnu-mined: $mined mined, $deviation deviation-documented, $deferred deferred, $skipped skipped, $failed failed"
 [ "$failed" -eq 0 ] || exit 1
 exit 0
