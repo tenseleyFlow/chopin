@@ -87,19 +87,23 @@ else
         diff "$work/m1" "$work/m2" | head -10
     fi
 
-    # 1-bit content change -> exactly the changed file's line differs.
+    # 1-bit content change -> exactly the linked lines' HASH moves
+    # (a.txt and hard.txt share the inode). Compare manifests directly:
+    # diff OUTPUT formats vary across GNU/busybox/BSD (family trap),
+    # so never parse diff.
     printf 'Alpha\n' > "$work/t2/a.txt"
     build/manifest-unittest "$work/t2" > "$work/m3" || bad "manifest t2v2 nonzero"
     if cmp -s "$work/m1" "$work/m3"; then
         bad "content change did not change the manifest"
     else
-        changed=$(diff "$work/m1" "$work/m3" | grep -c '^[<>]')
-        # a.txt and hard.txt share the inode: both lines' HASH move.
-        if [ "$changed" -eq 4 ]; then
+        grep -v -e '^a.txt ' -e '^hard.txt ' "$work/m1" > "$work/m1.rest"
+        grep -v -e '^a.txt ' -e '^hard.txt ' "$work/m3" > "$work/m3.rest"
+        a1=$(grep '^a.txt ' "$work/m1")
+        a3=$(grep '^a.txt ' "$work/m3")
+        if cmp -s "$work/m1.rest" "$work/m3.rest" && [ "$a1" != "$a3" ]; then
             note "ok: 1-bit change moves exactly the linked lines' HASH"
         else
-            bad "unexpected diff shape after content change ($changed lines)"
-            diff "$work/m1" "$work/m3"
+            bad "unexpected manifest shape after content change"
         fi
     fi
 

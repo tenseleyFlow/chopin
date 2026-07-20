@@ -177,11 +177,13 @@ hash_file(const char *full, uint64_t *out)
 
 /* --- xattr digest (-x) --------------------------------------------- */
 
+#if CHOPIN_HAVE_GETXATTR
 static int
 xattr_cmp(const void *a, const void *b)
 {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
+#endif
 
 static void
 emit_xattrs(const char *full)
