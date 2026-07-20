@@ -25,6 +25,20 @@ returns_() {
 
 Exit() { exit "$1"; }
 
+skip_if_root_() { [ "$(id -u)" = 0 ] && skip_ "must be run as non-root"; :; }
+
+# getlimits_ exports numeric limits plus C-locale errno strings the
+# scripts splice into expected output ($EACCES etc.).
+getlimits_() {
+    EACCES="Permission denied"
+    ENOENT="No such file or directory"
+    ENOTDIR="Not a directory"
+    EEXIST="File exists"
+    EISDIR="Is a directory"
+    EXDEV="Invalid cross-device link"
+    export EACCES ENOENT ENOTDIR EEXIST EISDIR EXDEV
+}
+
 # init.sh retry_delay_: call TESTFUNC with a delay argument, doubling
 # up to MAXTRIES attempts (time-sensitive tests). TESTFUNC returns 0
 # when the probe succeeded.

@@ -291,7 +291,12 @@ run_case() {
     elif [ "$wantrc" != "-" ] && [ "$rca" != "$wantrc" ]; then
         fail_case "$tag" "rc: both=$rca expected=$wantrc"; ok=0
     fi
-    if ! cmp -s "$cdir/A.man" "$cdir/B.man"; then
+    # CASE_NO_MANIFEST=1: diagnostics-only cases. A mid-abort
+    # into-self copy leaves an ORDER-DEPENDENT partial tree - GNU's
+    # own result varies with inode order across filesystems, so only
+    # the diagnostics and rc are pinnable (overview s2 corollary).
+    if [ "${CASE_NO_MANIFEST:-}" != 1 ] \
+        && ! cmp -s "$cdir/A.man" "$cdir/B.man"; then
         fail_case "$tag" "result trees differ"
         diff "$cdir/A.man" "$cdir/B.man" | head -10
         ok=0
@@ -804,6 +809,76 @@ for exroot in ${CHOPIN_TEST_FSROOT:-}; do
     rmtree "$exdst"
     break
 done
+
+# --- sprint 06: recursion ---------------------------------------------
+
+seed_tree() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/t/sub/deep" "$s/t/empty" "$s/dst" "$s/have/t"
+    printf 'a\n' > "$s/t/a"
+    printf 'b\n' > "$s/t/sub/b"
+    printf 'c\n' > "$s/t/sub/deep/c"
+    chmod 2750 "$s/t/sub"
+    ln -s ../a "$s/t/sub/lnk"
+    ln "$s/t/a" "$s/t/ahard"
+    mkfifo "$s/t/fifo"
+    ln -s loop "$s/t/loopy" 2>/dev/null || true
+    printf 'x\n' > "$s/have/t/old"
+    touch -d '2021-01-01 00:00:00' "$s/t/a" "$s/t/sub/b" \
+        "$s/t/sub/deep/c" "$s/have/t/old"
+    touch -h -d '2021-01-01 00:00:00' "$s/t/sub/lnk" "$s/t/loopy" \
+        2>/dev/null || true
+    touch -d '2021-01-01 00:00:00' "$s/t/sub/deep" "$s/t/sub" \
+        "$s/t/empty" "$s/t"
+}
+tr_() {
+    tr_flags="$1"; shift
+    CASE_SEED=seed_tree
+    MANIFEST_FLAGS="$tr_flags"
+    run_case "$@"
+    CASE_SEED=
+    MANIFEST_FLAGS=
+}
+tr_ "" rec-fresh "-R fresh tree" ORDERED C 0 -- -R t dst/t1
+tr_ "" rec-into-dir "-R into existing dir" ORDERED C 0 -- -R t dst
+tr_ "" rec-merge "-R merge over partial dest" ORDERED C 0 -- -R t have
+tr_ "-t" rec-archive "-a full tree" SORTED C 0 -- -a t dst/t2
+tr_ "" rec-verbose "-Rv sorted streams" SORTED C 0 -- -Rv t dst/t3
+tr_ "" rec-onto-file "-R dir onto non-dir" ORDERED C 1 -- -R t t/a
+tr_ "" rec-lowercase "-r equals -R" ORDERED C 0 -- -r t dst/t4
+tr_ "-t" rec-p-dirtimes "-R -p dir times post-order" SORTED C 0 \
+    -- -R -p t dst/t5
+tr_ "" rec-specials "fifo travels under -R" ORDERED C 0 -- -R t dst/t6
+tr_ "" rec-x "-x on one filesystem" ORDERED C 0 -- -R -x t dst/t7
+tr_ "" rec-links "-R --preserve=links" ORDERED C 0 \
+    -- -R --preserve=links t dst/t8
+# -RL derefs everything: the dangling loopy makes BOTH tools fail.
+tr_ "" rec-L "-RL derefs, dangling member fails" SORTED C 1 \
+    -- -RL t dst/t9
+tr_ "" rec-H "-RH top-level only" SORTED C 0 -- -RH t dst/t10
+tr_ "" rec-src-twice "source dir twice warns" SORTED C 0 -- -R t t dst
+tr_ "" rec-no-R "dir without -R omitted" ORDERED C 1 -- t dst/nope
+# Into-self: diagnostics + rc only (order-dependent partial trees).
+CASE_NO_MANIFEST=1
+tr_ "" rec-into-self "cp -R dir dir" ORDERED C 1 -- -R t t
+tr_ "" rec-into-sub "cp -R dir dir/sub" ORDERED C 1 -- -R t t/sub
+tr_ "" rec-dotdot "cp -R d/.. quirk" ORDERED C 1 -- -R t/.. dst2
+CASE_NO_MANIFEST=
+
+# --parents matrix.
+tr_ "" par-file "--parents single file" ORDERED C 0 \
+    -- --parents t/sub/deep/c dst
+tr_ "" par-verbose "--parents -v per-dir lines" ORDERED C 0 \
+    -- --parents -v t/sub/deep/c dst
+tr_ "-t" par-reprotect "--parents -p re_protect" ORDERED C 0 \
+    -- --parents -p t/sub/deep/c dst
+tr_ "" par-partial "--parents partially existing" ORDERED C 0 \
+    -- --parents t/a dst
+tr_ "" par-nomode "--parents --no-preserve=mode" ORDERED C 0 \
+    -- --parents --no-preserve=mode t/sub/deep/c dst
+tr_ "" par-subtree "--parents -R subtree" SORTED C 0 \
+    -- --parents -R t/sub dst
 
 # Dev tier: DEV-001 single-space fix, pinned corrected bytes.
 CASE_SEED=seed_backup

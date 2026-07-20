@@ -43,19 +43,15 @@ rm -rf "$work"
 mkdir -p "$work"
 trap 'chmod -R u+rwx "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
-# Mined set (sandbox-safe, no root/SELinux/mv, no -R yet).
-scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl link-deref link-no-deref deref-slink preserve-slink-time cp-HL link-heap cross-dev-symlink"
+# Mined set (sandbox-safe, no root/SELinux/mv).
+scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl link-deref link-no-deref deref-slink preserve-slink-time cp-HL link-heap cross-dev-symlink cp-parents r-vs-symlink dir-slash dir-vs-file cp-i into-self fail-perm existing-perm-dir thru-dangling"
 
 # script -> sprint whose machinery it waits for (DEFER, not failure).
 deferred_until() {
     case "$1" in
-    preserve-mode) echo "06" ;;   # uses cp -r mid-script
-    link-heap) echo "06" ;;       # ulimit -v + deep -R trees
-    cp-HL) echo "06" ;;           # -R directory halves
-    link-deref) echo "06" ;;      # cp --link -R dirlink half
     cross-dev-symlink) echo "07" ;;  # needs \$OTHER_PARTITION_TMPDIR
                                      # framework plumbing (fs lanes)
-    acl) echo "06" ;;             # setfacl vs the ACL-disabled oracle;
+    acl) echo "07" ;;             # setfacl vs the ACL-disabled oracle;
                                   # xattr-parity behavior is golden-
                                   # covered (meta-xattr); revisit with
                                   # the fs job lanes
