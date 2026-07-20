@@ -21,6 +21,7 @@
 #include "backup.h"
 #include "copy.h"
 #include "hashes.h"
+#include "meta.h"
 #include "options.h"
 #include "plan.h"
 #include "quote.h"
@@ -160,6 +161,207 @@ file_name_concat(const char *dir, const char *base, char **base_in_result)
     return p;
 }
 
+/* --parents machinery (cp.c:464-664, 370-442): pre-create missing
+   intermediates recording source attrs, fix them up post-copy in
+   times -> ownership -> mode order. */
+struct dir_attr {
+    struct stat st;
+    size_t slash_offset;
+    bool restore_mode;
+    struct dir_attr *next;
+};
+
+static bool
+make_dir_parents_private(const char *const_dir, size_t src_offset,
+                         int dst_dirfd, bool verbose,
+                         struct dir_attr **attr_list, bool *new_dst,
+                         const struct chopin_options *x)
+{
+    const char *lastc = last_component(const_dir);
+    size_t dirlen = (size_t)(lastc - const_dir);
+
+    while (dirlen > src_offset && const_dir[dirlen - 1] == '/')
+        dirlen--;
+    *attr_list = NULL;
+    if (dirlen <= src_offset)
+        return true;
+
+    char *dir = chopin_xstrdup(const_dir);
+    char *src = dir + src_offset;
+    char *dst_dir = chopin_xmalloc(dirlen + 1);
+    memcpy(dst_dir, dir, dirlen);
+    dst_dir[dirlen] = '\0';
+    const char *dst_reldir = dst_dir + src_offset;
+    while (*dst_reldir == '/')
+        dst_reldir++;
+
+    struct stat stats;
+    bool ok = true;
+
+    if (fstatat(dst_dirfd, dst_reldir, &stats, 0) != 0) {
+        char *slash = src;
+
+        while (*slash == '/')
+            slash++;
+        dst_reldir = slash;
+
+        while ((slash = strchr(slash, '/')) != NULL) {
+            struct dir_attr *new_attr = NULL;
+
+            *slash = '\0';
+            bool missing_dir =
+                fstatat(dst_dirfd, dst_reldir, &stats, 0) != 0;
+
+            if (missing_dir || x->preserve_ownership || x->preserve_mode
+                || x->preserve_timestamps) {
+                struct stat src_st;
+                int src_errno = stat(src, &src_st) != 0 ? errno
+                    : S_ISDIR(src_st.st_mode) ? 0 : ENOTDIR;
+
+                if (src_errno != 0) {
+                    chopin_error(src_errno, "failed to get attributes "
+                                            "of %s", chopin_quoteaf(src));
+                    ok = false;
+                    goto out;
+                }
+                new_attr = chopin_xmalloc(sizeof *new_attr);
+                new_attr->st = src_st;
+                new_attr->slash_offset = (size_t)(slash - dir);
+                new_attr->restore_mode = false;
+                new_attr->next = *attr_list;
+                *attr_list = new_attr;
+            }
+
+            if (missing_dir) {
+                *new_dst = true;
+                mode_t src_mode = new_attr->st.st_mode;
+                mode_t omitted = src_mode
+                    & (x->preserve_ownership ? (S_IRWXG | S_IRWXO)
+                       : x->preserve_mode ? (S_IWGRP | S_IWOTH) : 0);
+                mode_t mkdir_mode = (x->explicit_no_preserve_mode
+                                     ? 0777 : src_mode)
+                    & 07777 & (mode_t)~omitted;
+
+                if (mkdirat(dst_dirfd, dst_reldir, mkdir_mode) != 0) {
+                    chopin_error(errno, "cannot make directory %s",
+                                 chopin_quoteaf(dir));
+                    ok = false;
+                    goto out;
+                }
+                if (verbose)
+                    printf("%s -> %s\n", src, dir);
+                if (fstatat(dst_dirfd, dst_reldir, &stats,
+                            AT_SYMLINK_NOFOLLOW) != 0) {
+                    chopin_error(errno, "failed to get attributes of %s",
+                                 chopin_quoteaf(dir));
+                    ok = false;
+                    goto out;
+                }
+                if (!x->preserve_mode) {
+                    if (omitted & ~stats.st_mode)
+                        omitted &= (mode_t)~chopin_cached_umask();
+                    if ((omitted & ~stats.st_mode) != 0
+                        || (stats.st_mode & S_IRWXU) != S_IRWXU) {
+                        new_attr->st.st_mode = stats.st_mode | omitted;
+                        new_attr->restore_mode = true;
+                    }
+                }
+                mode_t accessible = stats.st_mode | S_IRWXU;
+                if (stats.st_mode != accessible
+                    && fchmodat(dst_dirfd, dst_reldir, accessible,
+                                0) != 0) {
+                    chopin_error(errno, "setting permissions for %s",
+                                 chopin_quoteaf(dir));
+                    ok = false;
+                    goto out;
+                }
+            } else if (!S_ISDIR(stats.st_mode)) {
+                chopin_error(0, "%s exists but is not a directory",
+                             chopin_quoteaf(dir));
+                ok = false;
+                goto out;
+            } else {
+                *new_dst = false;
+            }
+            *slash++ = '/';
+            while (*slash == '/')
+                slash++;
+        }
+    } else if (!S_ISDIR(stats.st_mode)) {
+        chopin_error(0, "%s exists but is not a directory",
+                     chopin_quoteaf(dst_dir));
+        ok = false;
+    } else {
+        *new_dst = false;
+    }
+out:
+    free(dst_dir);
+    free(dir);
+    return ok;
+}
+
+static bool
+re_protect(const char *const_dst_name, size_t src_offset, int dst_dirfd,
+           struct dir_attr *attr_list, const struct chopin_options *x)
+{
+    char *dst_name = chopin_xstrdup(const_dst_name);
+    const char *relname = dst_name + src_offset;
+    bool ok = true;
+
+    while (*relname == '/')
+        relname++;
+    for (struct dir_attr *p = attr_list; p != NULL; p = p->next) {
+        dst_name[p->slash_offset] = '\0';
+
+        if (x->preserve_timestamps) {
+            struct timespec ts[2];
+#if CHOPIN_HAVE_ST_MTIM
+            ts[0] = p->st.st_atim;
+            ts[1] = p->st.st_mtim;
+#elif CHOPIN_HAVE_ST_MTIMESPEC
+            ts[0] = p->st.st_atimespec;
+            ts[1] = p->st.st_mtimespec;
+#else
+            ts[0].tv_sec = p->st.st_atime;
+            ts[0].tv_nsec = 0;
+            ts[1].tv_sec = p->st.st_mtime;
+            ts[1].tv_nsec = 0;
+#endif
+            if (utimensat(dst_dirfd, relname, ts, 0) != 0) {
+                chopin_error(errno, "failed to preserve times for %s",
+                             chopin_quoteaf(dst_name));
+                ok = false;
+                break;
+            }
+        }
+        if (x->preserve_ownership) {
+            if (fchownat(dst_dirfd, relname, p->st.st_uid, p->st.st_gid,
+                         AT_SYMLINK_NOFOLLOW) != 0) {
+                if (!chopin_chown_failure_ok()) {
+                    chopin_error(errno, "failed to preserve ownership "
+                                        "for %s", chopin_quoteaf(dst_name));
+                    ok = false;
+                    break;
+                }
+                (void)!fchownat(dst_dirfd, relname, (uid_t)-1,
+                                p->st.st_gid, AT_SYMLINK_NOFOLLOW);
+            }
+        }
+        if (x->preserve_mode || p->restore_mode) {
+            if (fchmodat(dst_dirfd, relname, p->st.st_mode & 07777,
+                         0) != 0) {
+                chopin_error(errno, "failed to preserve permissions "
+                                    "for %s", chopin_quoteaf(dst_name));
+                ok = false;
+                break;
+            }
+        }
+        dst_name[p->slash_offset] = '/';
+    }
+    free(dst_name);
+    return ok;
+}
+
 /* Sprint 01 stand-in for the copy engine: record the resolved pair.
    Sprint 02 replaces this with copy_internal. */
 struct pair {
@@ -280,7 +482,6 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
                 dst_name = file_name_concat(target_directory, no_slash,
                                             &arg_in_concat);
                 free(no_slash);
-                /* make_dir_parents_private + re_protect: sprint 06. */
             } else {
                 char *arg_base = chopin_xstrdup(last_component(arg));
                 strip_trailing_slashes_inplace(arg_base);
@@ -297,11 +498,33 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
             } else {
                 const char *rel = arg_in_concat;
                 bool into_self;
+                bool parent_exists = true;
+                bool pnew_dst = false;
+                struct dir_attr *attr_list = NULL;
+                size_t src_off = (size_t)(arg_in_concat - dst_name);
 
                 while (*rel == '/')
                     rel++;
-                ok &= chopin_copy(arg, dst_name, target_dirfd, rel, 0,
-                                  &inv->x, &into_self);
+                if (inv->parents_option)
+                    parent_exists = make_dir_parents_private(
+                        dst_name, src_off, target_dirfd,
+                        inv->x.verbose, &attr_list, &pnew_dst, &inv->x);
+                if (!parent_exists) {
+                    ok = false;
+                } else {
+                    ok &= chopin_copy(arg, dst_name, target_dirfd, rel,
+                                      pnew_dst ? 1 : 0, &inv->x,
+                                      &into_self);
+                    if (inv->parents_option)
+                        ok &= re_protect(dst_name, src_off,
+                                         target_dirfd, attr_list,
+                                         &inv->x);
+                }
+                while (attr_list != NULL) {
+                    struct dir_attr *next = attr_list->next;
+                    free(attr_list);
+                    attr_list = next;
+                }
             }
             free(dst_name);
         }
