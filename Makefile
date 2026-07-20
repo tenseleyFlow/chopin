@@ -11,6 +11,7 @@ SRC = \
 	src/backup.c \
 	src/copy.c \
 	src/copydata.c \
+	src/hashes.c \
 	src/main.c \
 	src/options.c \
 	src/plan.c \

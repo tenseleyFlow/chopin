@@ -20,6 +20,7 @@
 #include "config.h"
 #include "backup.h"
 #include "copy.h"
+#include "hashes.h"
 #include "options.h"
 #include "plan.h"
 #include "quote.h"
@@ -259,7 +260,11 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
     bool ok = true;
 
     if (target_directory) {
-        /* dest_info_init/src_info_init for 2 <= n_files: sprint 03. */
+        /* Guard tables only when they can matter (cp.c:746-753): the
+           cp-a-a-b and same-source-twice guards are OFF for
+           single-source copies. */
+        if (2 <= n_files && !debug_options)
+            chopin_multi_source_init();
         for (int i = 0; i < n_files; i++) {
             char *dst_name;
             char *arg_in_concat;
@@ -330,19 +335,21 @@ do_copy(struct chopin_invocation *inv, bool debug_options)
             bool into_self;
             struct chopin_options x_local;
             const struct chopin_options *xp = &inv->x;
+            char *rewritten = NULL;
 
             if (samefile_rewrite) {
                 /* cp.c:848-873: dest becomes the backup name and
                    backup_type clears for the actual copy - the name
                    must be generated BEFORE clearing. */
-                dest = chopin_find_backup_name(AT_FDCWD, dest,
-                                               inv->x.backup_type);
+                dest = rewritten = chopin_find_backup_name(
+                    AT_FDCWD, dest, inv->x.backup_type);
                 x_local = inv->x;
                 x_local.backup_type = CHOPIN_BACKUP_NONE;
                 xp = &x_local;
             }
             ok = chopin_copy(source, dest, AT_FDCWD, dest, -new_dst,
                              xp, &into_self);
+            free(rewritten);
         }
         finish(inv, debug_options, new_dst, ok);
     }

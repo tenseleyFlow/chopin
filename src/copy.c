@@ -11,6 +11,7 @@
 #include "backup.h"
 #include "config.h"
 #include "copydata.h"
+#include "hashes.h"
 #include "quote.h"
 #include "util.h"
 
@@ -515,8 +516,16 @@ chopin_copy(const char *src_name, const char *dst_name,
         return false;
     }
 
-    /* Item 4: src_info duplicate guard needs >=2-source tables
-       (sprint 03). */
+    /* Item 4: src_info duplicate guard (2 <= n_files only;
+       cp.c:1700-1712): non-dir + no backups + seen -> warn, succeed. */
+    if (command_line_arg && chopin_multi_source_active()
+        && !S_ISDIR(src_sb.st_mode)
+        && x->backup_type == CHOPIN_BACKUP_NONE
+        && chopin_src_seen_or_record(src_name, &src_sb)) {
+        chopin_error(0, "warning: source file %s specified more than once",
+                     chopin_quoteaf(src_name));
+        return true;
+    }
 
     /* Item 5: dst stat policy. */
     bool use_lstat = x->symbolic_link || x->hard_link
@@ -607,8 +616,19 @@ chopin_copy(const char *src_name, const char *dst_name,
             return false;
         }
 
-        /* dest_info clobber guard: lands with the >=2-source tables
-           (03C). Backup block per copy.c:1912-1965. */
+        /* dest_info clobber guard (copy.c:1895-1910): numbered
+           backups bypass it. */
+        if (!S_ISDIR(dst_sb.st_mode) && command_line_arg
+            && x->backup_type != CHOPIN_BACKUP_NUMBERED
+            && chopin_multi_source_active()
+            && chopin_dest_seen(dst_relname, &dst_sb)) {
+            chopin_error(0, "will not overwrite just-created %s with %s",
+                         chopin_quoteaf_n(0, dst_name),
+                         chopin_quoteaf_n(1, src_name));
+            return false;
+        }
+
+        /* Backup block per copy.c:1912-1965. */
         const char *srcbase;
         if (x->backup_type != CHOPIN_BACKUP_NONE
             && !(strcmp(srcbase = last_component_of(src_name), ".") == 0
@@ -711,6 +731,14 @@ chopin_copy(const char *src_name, const char *dst_name,
     }
     free(dst_backup);
 
-    /* Item 15: dest_info recording - 03C. Metadata tail - sprint 04. */
+    /* Item 15: record dest_info via a fresh NOFOLLOW stat
+       (copy.c:2611-2618). Metadata tail - sprint 04. */
+    if (ok && command_line_arg && chopin_multi_source_active()) {
+        struct stat sb;
+
+        if (fstatat(dst_dirfd, dst_relname, &sb,
+                    AT_SYMLINK_NOFOLLOW) == 0)
+            chopin_dest_record(dst_relname, &sb);
+    }
     return ok;
 }
