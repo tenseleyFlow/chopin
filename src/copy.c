@@ -11,6 +11,7 @@
 #include "backup.h"
 #include "config.h"
 #include "copydata.h"
+#include "meta.h"
 #include "hashes.h"
 #include "quote.h"
 #include "util.h"
@@ -349,17 +350,20 @@ emit_debug(const struct chopin_options *x, const struct copy_debug *d)
            d->offload, d->reflink, d->sparse);
 }
 
-/* copy_reg per 2.4; scalar engine only this sprint. */
+/* copy_reg per 2.4; scalar engine until sprint 07. */
 static bool
 copy_reg(const char *src_name, const char *dst_name,
          int dst_dirfd, const char *dst_relname,
-         const struct chopin_options *x, mode_t dst_mode, bool *new_dst,
+         const struct chopin_options *x, mode_t dst_mode,
+         mode_t omitted_permissions, bool *new_dst,
          struct stat *src_sb)
 {
     struct stat src_open_sb;
     struct stat sb;
     int source_desc;
     int dest_desc = -1;
+    bool have_dest_sb_pre = false;
+    struct stat dest_sb_pre;
     bool return_val = true;
     struct copy_debug debug = { "no", "no", "no" };
     int open_flags = O_RDONLY
@@ -408,12 +412,11 @@ copy_reg(const char *src_name, const char *dst_name,
             *new_dst = true;
     }
 
-    if (*new_dst) {
-        /* omitted_permissions is folded by the caller into dst_mode;
-           extra_permissions (preserve_xattr sans privileges) lands in
-           sprint 04. */
-        mode_t open_mode = dst_mode;
+    mode_t open_mode = (dst_mode & ~omitted_permissions)
+        | (x->preserve_xattr && geteuid() != 0 ? S_IWUSR : 0);
+    mode_t extra_permissions = open_mode & ~dst_mode;
 
+    if (*new_dst) {
         dest_desc = openat(dst_dirfd, dst_relname,
                            O_WRONLY | O_CREAT | O_EXCL, open_mode);
         if (dest_desc < 0 && errno == EEXIST) {
@@ -458,6 +461,17 @@ copy_reg(const char *src_name, const char *dst_name,
         return_val = false;
         goto close_src_and_dst_desc;
     }
+    if (!*new_dst) {
+        dest_sb_pre = sb;
+        have_dest_sb_pre = true;
+    }
+
+    /* xattr-on-readonly dance (2.4 item 8): widen an existing dest
+       temporarily; if the chmod fails, drop extra_permissions. */
+    if (extra_permissions && !*new_dst) {
+        if (fchmod(dest_desc, sb.st_mode | extra_permissions) != 0)
+            extra_permissions = 0;
+    }
 
     if (x->data_copy_required) {
         if (!chopin_copy_file_data(source_desc, &src_open_sb, src_name,
@@ -465,8 +479,48 @@ copy_reg(const char *src_name, const char *dst_name,
             return_val = false;
     }
 
-    /* Metadata tail (times -> ownership -> xattr -> mode) arrives in
-       sprint 04; bare cp applies none of it for regular copies. */
+    /* Metadata tail in the load-bearing order (3.1). */
+    if (!chopin_apply_meta_fd(source_desc, src_name, dest_desc, dst_name,
+                              &src_open_sb,
+                              have_dest_sb_pre ? &dest_sb_pre : NULL,
+                              *new_dst, dst_mode, omitted_permissions,
+                              extra_permissions, x))
+        return_val = false;
+
+    /* CHOPIN_DEBUG_VERIFY v1: re-fstat the dest and assert what this
+       copy claims (size when data traveled; mode under preserve_mode,
+       tolerating the soft-ownership set-id strip). Content re-read
+       arrives with the fast engines (sprint 07). */
+    if (return_val) {
+        static int verify = -1;
+
+        if (verify < 0) {
+            const char *e = getenv("CHOPIN_DEBUG_VERIFY");
+            verify = e != NULL && *e != '\0' && *e != '0';
+        }
+        if (verify) {
+            struct stat vsb;
+
+            if (fstat(dest_desc, &vsb) != 0) {
+                chopin_error(errno, "VERIFY: cannot fstat %s",
+                             chopin_quoteaf(dst_name));
+                exit(CHOPIN_STATUS_FAIL);
+            }
+            if (x->data_copy_required && S_ISREG(src_open_sb.st_mode)
+                && vsb.st_size != src_open_sb.st_size)
+                chopin_die(0, "VERIFY: size mismatch on %s",
+                           chopin_quoteaf(dst_name));
+            if (x->preserve_mode) {
+                mode_t got = vsb.st_mode & 07777;
+                mode_t want = dst_mode;
+                mode_t want_soft =
+                    dst_mode & (mode_t)~(S_ISUID | S_ISGID | S_ISVTX);
+                if (got != want && got != want_soft)
+                    chopin_die(0, "VERIFY: mode %04o on %s",
+                               (unsigned)got, chopin_quoteaf(dst_name));
+            }
+        }
+    }
 
 close_src_and_dst_desc:
     if (close(dest_desc) < 0) {
@@ -702,14 +756,17 @@ chopin_copy(const char *src_name, const char *dst_name,
         ok = false;
     } else if (S_ISREG(src_sb.st_mode)
                || (x->copy_as_regular && !S_ISLNK(src_sb.st_mode))) {
-        /* Item 12: omitted_permissions - zero for regular files
-           without preserve_ownership (sprint 04 completes the
-           matrix). Item 14: regular dispatch (or copy_as_regular:
-           special files read as data without -R, quirk 13). */
+        /* Item 12 (copy.c:2288-2297): preserving ownership narrows
+           group/other at creation; the metadata tail re-widens
+           through the umask. Item 14: regular dispatch (or
+           copy_as_regular: special files read as data without -R,
+           quirk 13). */
         mode_t dst_mode_bits = src_sb.st_mode & 07777;
+        mode_t omitted = x->preserve_ownership
+            ? (dst_mode_bits & (S_IRWXG | S_IRWXO)) : 0;
 
         ok = copy_reg(src_name, dst_name, dst_dirfd, dst_relname, x,
-                      dst_mode_bits, &new_dst, &src_sb);
+                      dst_mode_bits, omitted, &new_dst, &src_sb);
     } else {
         chopin_error(0, "internal: special-file dispatch arrives in "
                         "sprint 06");

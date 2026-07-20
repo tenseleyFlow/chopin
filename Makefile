@@ -13,6 +13,7 @@ SRC = \
 	src/copydata.c \
 	src/hashes.c \
 	src/main.c \
+	src/meta.c \
 	src/options.c \
 	src/plan.c \
 	src/quote.c \
