@@ -1,0 +1,7 @@
+# Fuzz known-deviation filter. One line per active deviation:
+#   <REGISTER-ID> <diagnostic-or-manifest signature substring>
+# The harness refuses any line whose ID is absent from
+# doc/deviations.md (no filter line without a register entry).
+# Entries activate when the fix's behavior lands:
+#   DEV-001 sprint 03, DEV-002 sprint 05, DEV-004 sprint 03,
+#   DEV-005 sprint 07. DEV-003 is QUIRK-KEPT (never filtered).
