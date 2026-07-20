@@ -786,9 +786,13 @@ for exroot in ${CHOPIN_TEST_FSROOT:-}; do
         echo $? > "$cdir/$side.rc"
         assert_contained "$exdst/$side"
     done
-    # -l across devices: EXDEV failure bytes must match.
-    normprog < "$cdir/A.err" > "$cdir/A.err.n"
-    normprog < "$cdir/B.err" > "$cdir/B.err.n"
+    # -l across devices: EXDEV failure bytes must match. The dest
+    # paths differ per side (A/ vs B/); normalize them like the
+    # program token.
+    normprog < "$cdir/A.err" \
+        | sed "s|$exdst/A|EXROOT|g" > "$cdir/A.err.n"
+    normprog < "$cdir/B.err" \
+        | sed "s|$exdst/B|EXROOT|g" > "$cdir/B.err.n"
     if [ "$(cat "$cdir/A.rc")" = "$(cat "$cdir/B.rc")" ] \
         && cmp -s "$cdir/A.err.n" "$cdir/B.err.n"; then
         passed=$((passed + 1))
