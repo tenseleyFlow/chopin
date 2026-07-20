@@ -57,6 +57,17 @@ else
     build/opts_driver-unittest || bad "option-surface tables failed"
 fi
 
+# --- same_file_ok matrix (sprint 03), linked against src objects.
+if ! "$cc_bin" -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 $extra \
+    -I. -Isrc -Wall -Wextra -Werror -pthread \
+    -o build/samefile_driver-unittest tests/unit/samefile_driver.c \
+    src/copy.o src/copydata.o src/backup.o src/options.o src/plan.o \
+    src/quote.o src/util.o; then
+    bad "samefile_driver does not compile/link"
+else
+    build/samefile_driver-unittest || bad "same_file_ok matrix failed"
+fi
+
 # --- Manifest tool: build with the strict flag set, then self-test.
 # Compiles to its OWN artifact (build/manifest-unittest): build/manifest
 # belongs to the Makefile and the golden tier may be executing it right
