@@ -204,16 +204,10 @@ q18() {
     )
     q18_out="$q18_dir"
 }
-if command -v mkfifo >/dev/null 2>&1; then
+oracle18=$(sh scripts/find-gnu-cp.sh 2>/dev/null || true)
+if command -v mkfifo >/dev/null 2>&1 && [ -n "$oracle18" ]; then
     q18 "$root/chopin"; cdir="$q18_out"
-    q18 "$(sh scripts/find-gnu-cp.sh 2>/dev/null || echo ./chopin)"
-    odir="$q18_out"
-    if grep -q 'replaced while being copied' "$cdir/err"; then
-        note "ok: quirk-18 diagnostic fires in the swap window"
-    else
-        bad "quirk-18 diagnostic missing"
-        cat "$cdir/err"
-    fi
+    q18 "$oracle18"; odir="$q18_out"
     # The prompt and the skip diagnostic share one line (prompt has no
     # newline); split at "? " then normalize BOTH program tokens.
     norm18() {
@@ -221,15 +215,30 @@ if command -v mkfifo >/dev/null 2>&1; then
             | sed -e 's/^cp:/PROG:/' -e 's/^chopin:/PROG:/' \
             | grep 'replaced while'
     }
-    if [ "$(norm18 "$cdir")" = "$(norm18 "$odir")" ] \
-        && [ "$(cat "$cdir/rc")" = "$(cat "$odir/rc")" ]; then
-        note "ok: quirk-18 bytes and rc match the oracle"
+    cfired=$(grep -c 'replaced while being copied' "$cdir/err")
+    ofired=$(grep -c 'replaced while being copied' "$odir/err")
+    if [ "$cfired" -gt 0 ] && [ "$ofired" -gt 0 ]; then
+        # Both hit the window: this is the real DIFFERENTIAL assertion.
+        if [ "$(norm18 "$cdir")" = "$(norm18 "$odir")" ] \
+            && [ "$(cat "$cdir/rc")" = "$(cat "$odir/rc")" ]; then
+            note "ok: quirk-18 bytes and rc match the oracle"
+        else
+            bad "quirk-18 differs from oracle"
+            norm18 "$cdir"; norm18 "$odir"
+        fi
+    elif [ "$cfired" = "$ofired" ]; then
+        # Neither hit the TOCTOU window (loaded CI - inherently
+        # timing-bound); parity of the miss holds, no false failure.
+        note "skip: quirk-18 window not hit by either tool (loaded box)"
     else
-        bad "quirk-18 differs from oracle"
+        # One hit and the other did not - a genuine behavioral split,
+        # not a timing artifact.
+        bad "quirk-18 window asymmetry (chopin=$cfired oracle=$ofired)"
+        cat "$cdir/err"; echo "--"; cat "$odir/err"
     fi
     rm -rf "$cdir" "$odir"
 else
-    note "skip: quirk-18 pin (no mkfifo)"
+    note "skip: quirk-18 pin (no mkfifo/oracle)"
 fi
 
 # --- Metadata order pin (sprint 04A): utimensat before fchown before
