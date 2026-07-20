@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+    branches: [trunk]
+    tags: ['v*']
+  pull_request:
+    branches: [trunk]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install GNU coreutils oracle (macOS)
+        if: runner.os == 'macOS'
+        run: brew install coreutils
+      # attr dev headers: the oracle build REFUSES a no-xattr cp
+      # (feature pin, sprint 00); attr tools feed the unit xattr
+      # self-test and sprint 04 goldens.
+      - name: install attr (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libattr1-dev attr
+      - name: generate UTF-8 matrix locale (Linux)
+        if: runner.os == 'Linux'
+        run: sudo locale-gen en_US.UTF-8
+      # Linux builds the exact pinned oracle from source (cached); macOS
+      # uses brew's gcp as a loose oracle - coreutils 9.11 does not build
+      # cleanly against current macOS SDKs, so pin-sensitive cases skip
+      # there (nomad-1 carries the pinned run at release time).
+      - name: cache pinned oracle
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: build/gnu-cp
+          key: gnu-cp-9.11-${{ runner.os }}-v1
+      - name: build pinned oracle (coreutils 9.11)
+        if: runner.os == 'Linux'
+        run: sh scripts/build-gnu-cp.sh
+      - run: ./configure
+      - run: make
+      - run: make check
+      - run: make sanitize
+
+  alpine:
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      # build-base gives gcc/make against musl; coreutils provides the
+      # GNU oracle (busybox cp is never an oracle); attr-dev/attr for the
+      # xattr pin. No sanitize: musl has no ASan. The whole build+check
+      # runs as a NON-ROOT user so the destructive golden tier and the
+      # permission cases actually execute (family root-skip fix).
+      - run: apk add build-base bash grep sed coreutils attr attr-dev shadow
+      - run: adduser -D ci && chown -R ci:ci .
+      - run: su ci -c './configure'
+      - run: su ci -c 'make'
+      - run: su ci -c 'make check'
+
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y gmake coreutils
+          # Runs as root: build + unit stay green; the golden tier
+          # self-skips (77) by design - destructive tests never run
+          # as root.
+          run: |
+            ./configure
+            gmake
+            gmake check
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, alpine, freebsd]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: distcheck and tarball
+        run: |
+          ./configure
+          make distcheck
+          sha256sum chopin-*.tar.gz > SHA256SUMS
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Idempotent: an API-outage rerun uploads into the release a
+          # manual recovery already created (family lesson).
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --clobber \
+              chopin-*.tar.gz SHA256SUMS
+            exit 0
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "chopin ${GITHUB_REF_NAME}" \
+            --notes "chopin ${GITHUB_REF_NAME}. Release notes land with v0.1.0 (sprint 11)." \
+            chopin-*.tar.gz SHA256SUMS
