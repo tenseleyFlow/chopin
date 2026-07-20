@@ -635,6 +635,12 @@ chopin_copy(const char *src_name, const char *dst_name,
             bool older = dst_sb.st_mtim.tv_sec < src_sb.st_mtim.tv_sec
                 || (dst_sb.st_mtim.tv_sec == src_sb.st_mtim.tv_sec
                     && dst_sb.st_mtim.tv_nsec < src_sb.st_mtim.tv_nsec);
+#elif CHOPIN_HAVE_ST_MTIMESPEC
+            bool older =
+                dst_sb.st_mtimespec.tv_sec < src_sb.st_mtimespec.tv_sec
+                || (dst_sb.st_mtimespec.tv_sec == src_sb.st_mtimespec.tv_sec
+                    && dst_sb.st_mtimespec.tv_nsec
+                       < src_sb.st_mtimespec.tv_nsec);
 #else
             bool older = dst_sb.st_mtime < src_sb.st_mtime;
 #endif

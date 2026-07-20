@@ -88,8 +88,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install tools
-        run: sudo apt-get update && sudo apt-get install -y \
-             libattr1-dev attr btrfs-progs xfsprogs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libattr1-dev attr btrfs-progs xfsprogs
       - name: create loopback mounts
         run: |
           sudo mkdir -p /mnt/chopin-btrfs /mnt/chopin-xfs /mnt/chopin-small

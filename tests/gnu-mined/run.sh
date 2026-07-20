@@ -25,6 +25,11 @@ case $("$oracle" --version | sed -n 1p) in
 *" 9.11") ;;
 *) echo "gnu-mined: oracle not the 9.11 pin; skipping (77)" >&2; exit 77 ;;
 esac
+if [ "$oracle" != "$root/build/gnu-cp/src/cp" ] \
+    && [ "${CHOPIN_ORACLE_STRICT:-}" != 1 ]; then
+    echo "gnu-mined: oracle not the feature-pinned build; skipping (77)" >&2
+    exit 77
+fi
 
 corpus="$root/.docs/refs/gnu-coreutils/tests/cp"
 [ -d "$corpus" ] || {

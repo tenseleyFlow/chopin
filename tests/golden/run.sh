@@ -96,8 +96,21 @@ oracle=$(sh scripts/find-gnu-cp.sh) || {
     exit 77
 }
 oracle_ver=$("$oracle" --version | sed -n 1p)
+# Parity needs the 9.11 pin AND the feature-pinned build: a distro or
+# brew 9.11 carries an unknown configure set and platform-divergent
+# semantics (APFS, Darwin xattr API). CHOPIN_ORACLE_STRICT=1 overrides
+# for a hand-supplied pinned oracle.
 case "$oracle_ver" in
-*" 9.11") PARITY_ACTIVE=1 ;;
+*" 9.11")
+    if [ "$oracle" = "$root/build/gnu-cp/src/cp" ] \
+        || [ "${CHOPIN_ORACLE_STRICT:-}" = 1 ]; then
+        PARITY_ACTIVE=1
+    else
+        PARITY_ACTIVE=0
+        echo "golden: oracle is 9.11 but not the feature-pinned build;" >&2
+        echo "  self-tests run, parity cases skip ($oracle)" >&2
+    fi
+    ;;
 *)
     PARITY_ACTIVE=0
     echo "golden: oracle is not the 9.11 pin ($oracle_ver);" >&2

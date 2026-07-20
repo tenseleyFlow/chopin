@@ -156,6 +156,9 @@ chopin_apply_meta_fd(int src_fd, const char *src_name,
 #if CHOPIN_HAVE_ST_MTIM
         ts[0] = src_sb->st_atim;
         ts[1] = src_sb->st_mtim;
+#elif CHOPIN_HAVE_ST_MTIMESPEC
+        ts[0] = src_sb->st_atimespec;
+        ts[1] = src_sb->st_mtimespec;
 #else
         ts[0].tv_sec = src_sb->st_atime;
         ts[0].tv_nsec = 0;
