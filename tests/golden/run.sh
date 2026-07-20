@@ -52,6 +52,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Permission-trap-safe removal (555-dir seeds).
+rmtree() {
+    chmod -R u+rwx "$1" 2>/dev/null || true
+    rm -rf "$1"
+}
+
 # Assert DIR realpath-resolves under a registered root.
 assert_contained() {
     d="$1"
@@ -162,7 +168,7 @@ seed_smoke() {
 
 mkpair() {
     mp_case="$1"; mp_seed="$2"
-    rm -rf "$work/$mp_case"
+    rmtree "$work/$mp_case"
     mkdir -p "$work/$mp_case/A" "$work/$mp_case/B"
     "$mp_seed" "$work/$mp_case/A"
     "$mp_seed" "$work/$mp_case/B"
@@ -245,7 +251,8 @@ run_case() {
             set -- "$@" "$a"
             n=$((n - 1))
         done
-        run_pinned "$lc" "$sb" "$tool" "$@" \
+        printf '%s' "${CASE_STDIN:-}" \
+            | run_pinned "$lc" "$sb" "$tool" "$@" \
             > "$cdir/$side.out" 2> "$cdir/$side.err"
         echo $? > "$cdir/$side.rc"
         assert_contained "$sb"
@@ -286,11 +293,72 @@ run_case() {
     fi
     if [ "$ok" = 1 ]; then
         passed=$((passed + 1))
-        rm -rf "$cdir"
+        rmtree "$cdir"
     else
         echo "  artifacts kept: $cdir"
     fi
 }
+
+# --- deviation tier --------------------------------------------------
+# run_case_dev TAG desc lc -- <args>: the UUT must byte-match the
+# PINNED corrected behavior (tests/golden/dev/TAG.{out,err,rc,man},
+# generated once and reviewed) while the ORACLE must still differ
+# from the pin - an upstream fix trips DEVIATION VANISHED and forces
+# re-evaluating doc/deviations.md. Cases arrive with their fixes
+# (sprint 03 onward).
+run_case_dev() {
+    dv_tag="$1"; dv_desc="$2"; dv_lc="$3"
+    shift 3
+    [ "$1" = "--" ] || { echo "run_case_dev $dv_tag: missing --" >&2; exit 1; }
+    shift
+    cases=$((cases + 1))
+    pin="$root/tests/golden/dev/$dv_tag"
+    if [ ! -f "$pin.err" ]; then
+        echo "run_case_dev $dv_tag: pin files missing" >&2
+        failed=$((failed + 1))
+        return 0
+    fi
+    mkpair "dev-$dv_tag" "${CASE_SEED:-seed_smoke}"
+    cdir="$work/dev-$dv_tag"
+    for f in A.out A.err B.out B.err A.rc B.rc; do : > "$cdir/$f"; done
+    for side in A B; do
+        if [ "$side" = A ]; then tool="$oracle"; else tool="$uut"; fi
+        sb="$cdir/$side"
+        printf '%s' "${CASE_STDIN:-}" \
+            | run_pinned "$dv_lc" "$sb" "$tool" "$@" \
+            > "$cdir/$side.out" 2> "$cdir/$side.err"
+        echo $? > "$cdir/$side.rc"
+        assert_contained "$sb"
+    done
+    ok=1
+    normprog < "$cdir/B.err" > "$cdir/B.err.n"
+    if ! cmp -s "$cdir/B.err.n" "$pin.err" \
+        || [ "$(cat "$cdir/B.rc")" != "$(cat "$pin.rc")" ]; then
+        fail_case "dev-$dv_tag" "UUT does not match the pinned fix"
+        diff "$pin.err" "$cdir/B.err.n" | head -6
+        ok=0
+    fi
+    normprog < "$cdir/A.err" > "$cdir/A.err.n"
+    if cmp -s "$cdir/A.err.n" "$pin.err" \
+        && [ "$(cat "$cdir/A.rc")" = "$(cat "$pin.rc")" ]; then
+        fail_case "dev-$dv_tag" \
+            "DEVIATION VANISHED: oracle now matches the pin; re-evaluate doc/deviations.md"
+        ok=0
+    fi
+    if [ "$ok" = 1 ]; then
+        passed=$((passed + 1))
+        rmtree "$cdir"
+    fi
+}
+
+# Filter-file integrity: no DEVIATIONS line without a register entry.
+while read -r dev_id _; do
+    case "$dev_id" in ''|'#'*) continue ;; esac
+    grep -q "^## $dev_id " "$root/doc/deviations.md" || {
+        echo "golden: DEVIATIONS filter names $dev_id absent from doc/deviations.md" >&2
+        exit 1
+    }
+done < "$root/tests/golden/DEVIATIONS"
 
 # --- self-test phase: oracle vs oracle -------------------------------
 # Proves sandbox building, pinning, capture, manifest comparison and
@@ -319,7 +387,7 @@ selftest_round() {
         echo "golden: SELF-TEST FAILED (round $st_round): oracle stderr differs" >&2
         exit 1
     fi
-    rm -rf "$cdir"
+    rmtree "$cdir"
 }
 
 selftest_round 1
@@ -401,8 +469,113 @@ run_case err-3op-notdir "three operands last not dir" ORDERED C 1 \
     -- SRC/a.txt SRC/sub/b.txt no-such-target
 run_case err-parents-nondir "--parents non-dir dest" ORDERED C 1 \
     -- --parents SRC/a.txt no-such-dest
-# --context=ctx warn-then-successful-copy joins in sprint 02 (the
-# oracle proceeds to copy; interim chopin cannot). Unit-covered now.
+
+# --- sprint 02: single-file copy matrix ------------------------------
+# Twin-sandbox manifest comparison; --reflink=always and --debug
+# engine-line comparisons stay OUT until sprint 07 (locked interim
+# divergence).
+
+seed_copy() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/src" "$s/dst/adir"
+    printf 'alpha\n' > "$s/src/a.txt"
+    printf 'beta\n' > "$s/src/b.txt"
+    chmod 640 "$s/src/b.txt"
+    printf 'old\n' > "$s/dst/a.txt"
+    printf 'oldc\n' > "$s/dst/old.txt"
+    touch -d '2020-01-01 00:00:00' "$s/dst/old.txt"
+    ln -s dangle-target "$s/dst/dangling"
+    printf 'x\n' > "$s/src/unread.txt"
+    chmod 000 "$s/src/unread.txt"
+    mkdir "$s/dst/nowrite"
+    printf 'w\n' > "$s/dst/nowrite/keep.txt"
+    chmod 555 "$s/dst/nowrite"
+}
+
+CASE_SEED=seed_copy
+run_case cp-fresh "fresh single-file copy" ORDERED C 0 \
+    -- SRC/a.txt DST/fresh.txt
+run_case cp-overwrite "overwrite existing dst" ORDERED C 0 \
+    -- SRC/a.txt DST/a.txt
+run_case cp-into-dir "multi-source into dir" ORDERED C 0 \
+    -- SRC/a.txt SRC/b.txt DST
+run_case cp-mode "source mode travels to new dst" ORDERED C 0 \
+    -- SRC/b.txt DST/mode.txt
+run_case cp-v "verbose bytes" ORDERED C 0 -- -v SRC/a.txt DST/v.txt
+run_case cp-v-multi "verbose multi-source" ORDERED C 0 \
+    -- -v SRC/a.txt SRC/b.txt DST
+run_case cp-n "-n silent skip exit 0" ORDERED C 0 \
+    -- -n SRC/a.txt DST/a.txt
+CASE_STDIN='y
+'
+run_case cp-i-yes "-i answered yes" ORDERED C 0 -- -i SRC/a.txt DST/a.txt
+CASE_STDIN='n
+'
+run_case cp-i-no "-i declined exit 1 silent" ORDERED C 1 \
+    -- -i SRC/a.txt DST/a.txt
+CASE_STDIN=
+run_case cp-i-eof "-i EOF declines" ORDERED C 1 -- -i SRC/a.txt DST/a.txt
+CASE_STDIN='y
+'
+run_case cp-i-unwritable "unwritable prompt wording" ORDERED C 0 \
+    -- -i SRC/a.txt DST/old.txt
+CASE_STDIN=
+run_case cp-f "-f over existing" ORDERED C 0 -- -f SRC/a.txt DST/a.txt
+run_case cp-update-older-skip "--update=older newer dst skips" ORDERED C 0 \
+    -- --update=older SRC/a.txt DST/old.txt
+run_case cp-update-none "--update=none silent skip" ORDERED C 0 \
+    -- --update=none SRC/a.txt DST/a.txt
+run_case cp-update-nonefail "--update=none-fail refuses" ORDERED C 1 \
+    -- --update=none-fail SRC/a.txt DST/a.txt
+run_case cp-unreadable "unreadable source" ORDERED C 1 \
+    -- SRC/unread.txt DST/u.txt
+run_case cp-unwritable-dir "unwritable dst dir" ORDERED C 1 \
+    -- SRC/a.txt DST/nowrite/new.txt
+run_case cp-same-file "same file refused" ORDERED C 1 \
+    -- DST/a.txt DST/a.txt
+run_case cp-T-ontodir "-T onto existing dir" ORDERED C 1 \
+    -- -T SRC/a.txt DST/adir
+run_case cp-remove-dest "--remove-destination -v" ORDERED C 0 \
+    -- -v --remove-destination SRC/a.txt DST/a.txt
+run_case cp-trailing-slash "EISDIR->ENOTDIR trailing slash" ORDERED C 1 \
+    -- SRC/a.txt DST/nonexist/
+run_case cp-dangling-dest "dangling dest symlink refused" ORDERED C 1 \
+    -- SRC/a.txt DST/dangling
+run_case cp-context-warn "--context=ctx warns then copies" ORDERED C 0 \
+    -- --context=ctx SRC/a.txt DST/ctx.txt
+run_case cp-debug-skip "-n --debug prints skipped" ORDERED C 0 \
+    -- -n --debug SRC/a.txt DST/a.txt
+CASE_SEED=
+
+# The unwritable-dir seed leaves a 555 directory; the cleanup trap's
+# chmod -R handles it.
+
+# stdout write-error path (atexit close_stdout, gnu-cp-analysis.md
+# 4.1): needs /dev/full - Linux lanes only, clean skip elsewhere.
+if [ -w /dev/full ] && [ "$PARITY_ACTIVE" = 1 ]; then
+    cases=$((cases + 1))
+    mkpair case-devfull seed_copy
+    cdir="$work/case-devfull"
+    for f in A.err B.err A.rc B.rc; do : > "$cdir/$f"; done
+    for side in A B; do
+        if [ "$side" = A ]; then tool="$oracle"; else tool="$uut"; fi
+        sb="$cdir/$side"
+        run_pinned C "$sb" "$tool" -v src/a.txt dst/full.txt \
+            > /dev/full 2> "$cdir/$side.err" < /dev/null
+        echo $? > "$cdir/$side.rc"
+    done
+    normprog < "$cdir/A.err" > "$cdir/A.err.n"
+    normprog < "$cdir/B.err" > "$cdir/B.err.n"
+    if [ "$(cat "$cdir/A.rc")" = "$(cat "$cdir/B.rc")" ] \
+        && cmp -s "$cdir/A.err.n" "$cdir/B.err.n"; then
+        passed=$((passed + 1))
+        rmtree "$cdir"
+    else
+        fail_case devfull "write-error path differs"
+        diff "$cdir/A.err.n" "$cdir/B.err.n" | head -6
+    fi
+fi
 
 # --- summary ---------------------------------------------------------
 

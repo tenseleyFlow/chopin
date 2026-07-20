@@ -37,11 +37,11 @@ case "$vc" in
 *) bad "cpn does not report its own name: $vc" ;;
 esac
 
-# --- Skeleton refuses real work with exit 1.
-if ./chopin a b 2>/dev/null; then
-    bad "skeleton chopin a b should exit 1"
+# --- Missing source fails with exit 1 (cannot stat).
+if ./chopin chopin-no-such-src chopin-no-such-dst 2>/dev/null; then
+    bad "copy of nonexistent source should exit 1"
 else
-    note "ok: skeleton refuses copy with exit 1"
+    note "ok: nonexistent source fails with exit 1"
 fi
 
 # --- Option-surface tables (sprint 01): resolution orderings,
