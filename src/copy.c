@@ -695,8 +695,9 @@ close_src_desc:
         return_val = false;
     }
 
-    if (return_val)
-        emit_debug(x, &debug);
+    /* GNU prints the --debug line for FAILED copies too (all-unknown
+       when nothing was consulted) - fuzz trial 42-76. */
+    emit_debug(x, &debug);
     return return_val;
 }
 
@@ -940,20 +941,24 @@ copy_internal(const char *src_name, const char *dst_name,
             }
         }
 
-        /* dir/non-dir mismatch (copy.c:1880-1893). */
-        if (S_ISDIR(src_sb.st_mode) && !S_ISDIR(dst_sb.st_mode)) {
-            chopin_error(0, "cannot overwrite non-directory %s with "
-                            "directory %s",
-                         chopin_quoteaf_n(0, dst_name),
-                         chopin_quoteaf_n(1, src_name));
-            return false;
-        }
-        if (!S_ISDIR(src_sb.st_mode) && S_ISDIR(dst_sb.st_mode)) {
-            chopin_error(0, "cannot overwrite directory %s with "
-                            "non-directory %s",
-                         chopin_quoteaf_n(0, dst_name),
-                         chopin_quoteaf_n(1, src_name));
-            return false;
+        /* dir/non-dir mismatch (copy.c:1880-1893) - only when NO
+           backups: a backup renames the conflicting dest aside and
+           the copy proceeds (fuzz trial 42-119). */
+        if (x->backup_type == CHOPIN_BACKUP_NONE) {
+            if (S_ISDIR(src_sb.st_mode) && !S_ISDIR(dst_sb.st_mode)) {
+                chopin_error(0, "cannot overwrite non-directory %s with "
+                                "directory %s",
+                             chopin_quoteaf_n(0, dst_name),
+                             chopin_quoteaf_n(1, src_name));
+                return false;
+            }
+            if (!S_ISDIR(src_sb.st_mode) && S_ISDIR(dst_sb.st_mode)) {
+                chopin_error(0, "cannot overwrite directory %s with "
+                                "non-directory %s",
+                             chopin_quoteaf_n(0, dst_name),
+                             chopin_quoteaf_n(1, src_name));
+                return false;
+            }
         }
 
         /* dest_info clobber guard (copy.c:1895-1910): numbered
@@ -1002,9 +1007,10 @@ copy_internal(const char *src_name, const char *dst_name,
             }
             new_dst = true;
         }
-
-        /* Unlink-before, complete (copy.c:1966-1984). */
-        if (!S_ISDIR(dst_sb.st_mode)
+        /* Unlink-before is ELSE-IF chained after the backup block in
+           GNU (1966): a backed-up dest is already renamed away -
+           unlinking its old name would ENOENT (fuzz 1234-45/99). */
+        else if (!S_ISDIR(dst_sb.st_mode)
             && (x->unlink_dest_before_opening
                 || (x->data_copy_required
                     && ((x->preserve_links && 1 < dst_sb.st_nlink)
@@ -1185,6 +1191,14 @@ after_labels:
                                    restore_dst_mode, x))
             delayed_ok = false;
 
+        /* Content/metadata failures never un_backup in GNU (only the
+           pre-dispatch gotos do): the copied-so-far dir stays, and
+           renaming the file backup over a DIRECTORY would EISDIR
+           anyway (fuzz 42-119). */
+        if (!delayed_ok) {
+            free(dst_backup);
+            dst_backup = NULL;
+        }
         ok = delayed_ok;
         goto tail;
     }

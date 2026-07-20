@@ -450,8 +450,8 @@ sparse_copy(int src_fd, int dest_fd, size_t bsize,
             *last_write_made_hole = make_hole;
             psize = 0;
         }
-        if (hole_detection)
-            debug->sparse = "zeros";
+        /* The CALLER owns the sparse word: overwriting here clobbered
+           "SEEK_HOLE + zeros" per buffer (fuzz 1234-51). */
     }
     return total_n_read;
 }
@@ -477,8 +477,10 @@ chopin_copy_file_data(int src_fd, const struct stat *src_sb,
     if (bsize == 0)
         bsize = blcm;
 
-    /* Entering the data path downgrades its stages from "unknown". */
-    debug->offload = "no";
+    /* Entering the data path downgrades sparse from "unknown"; the
+       OFFLOAD word moves only on an actual attempt (yes/unsupported)
+       or policy avoidance - an empty file leaves it "unknown"
+       exactly as GNU does (fuzz trial 42-41). */
     debug->sparse = "no";
 
     /* Scantype is inferred (and reported) regardless of sparse mode:
@@ -502,10 +504,9 @@ chopin_copy_file_data(int src_fd, const struct stat *src_sb,
     bool hole_detection = make_holes
         && (x->sparse_mode == CHOPIN_SPARSE_ALWAYS
             || scantype == ZERO_SCANTYPE);
-    if (hole_detection && scantype == LSEEK_SCANTYPE)
-        debug->sparse = "SEEK_HOLE + zeros";
-    if (hole_detection && scantype == ZERO_SCANTYPE)
-        debug->sparse = "zeros";
+    if (hole_detection)
+        debug->sparse = scantype == LSEEK_SCANTYPE
+            ? "SEEK_HOLE + zeros" : "zeros";
 
     /* Offload "avoided" = disabled by policy (reflink=never) or by
        active zero-detection, before any attempt. */
