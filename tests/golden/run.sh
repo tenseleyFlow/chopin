@@ -54,6 +54,12 @@ for fsroot in ${CHOPIN_TEST_FSROOT:-}; do
 done
 
 cleanup() {
+    # Failure artifacts must SURVIVE for reproduction (the harness
+    # promises "artifacts kept"); only a green run cleans up.
+    if [ "${failed:-0}" -gt 0 ]; then
+        echo "golden: artifacts preserved under $work" >&2
+        return 0
+    fi
     chmod -R u+rwx "$work" 2>/dev/null || true
     rm -rf "$work"
 }
@@ -879,6 +885,55 @@ tr_ "" par-nomode "--parents --no-preserve=mode" ORDERED C 0 \
     -- --parents --no-preserve=mode t/sub/deep/c dst
 tr_ "" par-subtree "--parents -R subtree" SORTED C 0 \
     -- --parents -R t/sub dst
+
+# --- sprint 07: data engines ------------------------------------------
+
+seed_engine() {
+    s="$1"
+    umask 022
+    mkdir -p "$s/dst"
+    printf 'plain\n' > "$s/plain"
+    : > "$s/sparse"
+    dd if=/dev/zero of="$s/sparse" bs=1 count=8 seek=1048576 \
+        conv=notrunc 2>/dev/null
+    printf 'DATA' | dd of="$s/sparse" bs=1 seek=2097152 \
+        conv=notrunc 2>/dev/null
+    truncate -s 4194304 "$s/sparse"
+    dd if=/dev/zero of="$s/zeros" bs=4096 count=64 2>/dev/null
+    seq 1 20000 > "$s/data"
+    touch -d '2021-01-01 00:00:00' "$s/plain" "$s/sparse" "$s/zeros" \
+        "$s/data"
+}
+en() {
+    CASE_SEED=seed_engine
+    run_case "$@"
+    CASE_SEED=
+}
+en eng-plain "plain through the ladder" ORDERED C 0 -- plain dst/p
+en eng-sparse-auto "sparse preserved under auto" ORDERED C 0 \
+    -- sparse dst/s
+en eng-sparse-always "zeros punched under always" ORDERED C 0 \
+    -- --sparse=always zeros dst/z
+en eng-sparse-never "holes expanded under never" ORDERED C 0 \
+    -- --sparse=never sparse dst/sn
+en eng-offload "offload lane data" ORDERED C 0 -- data dst/r
+en eng-reflink-never "reflink=never pure read/write" ORDERED C 0 \
+    -- --reflink=never data dst/rn
+en eng-reflink-always "reflink=always fatal off-CoW" ORDERED C - \
+    -- --reflink=always data dst/ra
+en eng-debug-plain "--debug vocabulary plain" ORDERED C 0 \
+    -- --debug plain dst/dp
+en eng-debug-sparse "--debug SEEK_HOLE" ORDERED C 0 \
+    -- --debug sparse dst/ds
+en eng-debug-zeros "--debug zeros under always" ORDERED C 0 \
+    -- --debug --sparse=always zeros dst/dz
+en eng-debug-avoided "--debug avoided under reflink=never" ORDERED C 0 \
+    -- --debug --reflink=never data dst/dr
+en eng-debug-sn "--debug sparse=never still scans" ORDERED C 0 \
+    -- --debug --sparse=never sparse dst/dsn
+# Note eng-reflink-always uses rc '-': on btrfs/XFS fs-lanes the clone
+# SUCCEEDS (rc 0), on ext4/tmpfs it is fatal (rc 1) - agreement is the
+# assertion; the manifest still must match.
 
 # Dev tier: DEV-001 single-space fix, pinned corrected bytes.
 CASE_SEED=seed_backup

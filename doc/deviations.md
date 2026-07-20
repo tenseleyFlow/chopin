@@ -60,7 +60,11 @@ TRUNCATED destination; in lseek_copy the 0 is misread as "input file
 shrank" (433-437). Data-loss class (quirk register 34). chopin
 propagates the failure: nonzero exit, copy_reg failure envelope.
 Upstream: draft ready.
-Pinned by: dev-tier case (sprint 07).
+Pinned by: code site (create_hole in src/copydata.c returns -1 and
+every caller propagates). A real mid-file punch failure needs an
+environment fault the sandbox cannot stage deterministically (GNU's
+own make_holes gate excludes non-regular dests); sprint 08's
+bounded-ENOSPC fuzz lane exercises the path.
 
 ## DEV-006 build-configuration parity notes [BUILD-PARITY]
 

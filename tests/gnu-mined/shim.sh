@@ -27,6 +27,23 @@ Exit() { exit "$1"; }
 
 skip_if_root_() { [ "$(id -u)" = 0 ] && skip_ "must be run as non-root"; :; }
 
+require_sparse_support_() {
+    rss_f=sparse-probe.$$
+    truncate -s 1M "$rss_f" 2>/dev/null || skip_ "no truncate"
+    rss_b=$(stat -c %b "$rss_f" 2>/dev/null || echo 9999)
+    rm -f "$rss_f"
+    [ "$rss_b" -lt 128 ] || skip_ "this filesystem does not support holes"
+}
+
+mkfifo_or_skip_() { mkfifo "$1" 2>/dev/null || skip_ "cannot create fifo"; }
+
+require_valgrind_() {
+    command -v valgrind >/dev/null 2>&1 || skip_ "no valgrind"
+    valgrind --error-exitcode=1 true 2>/dev/null || skip_ "valgrind broken"
+}
+
+require_perl_() { command -v perl >/dev/null 2>&1 || skip_ "no perl"; }
+
 # getlimits_ exports numeric limits plus C-locale errno strings the
 # scripts splice into expected output ($EACCES etc.).
 getlimits_() {

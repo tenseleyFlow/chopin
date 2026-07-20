@@ -44,7 +44,7 @@ mkdir -p "$work"
 trap 'chmod -R u+rwx "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
 # Mined set (sandbox-safe, no root/SELinux/mv).
-scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl link-deref link-no-deref deref-slink preserve-slink-time cp-HL link-heap cross-dev-symlink cp-parents r-vs-symlink dir-slash dir-vs-file cp-i into-self fail-perm existing-perm-dir thru-dangling"
+scripts="backup-1 backup-is-src cp-mv-backup preserve-mode acl link-deref link-no-deref deref-slink preserve-slink-time cp-HL link-heap cross-dev-symlink cp-parents r-vs-symlink dir-slash dir-vs-file cp-i into-self fail-perm existing-perm-dir thru-dangling sparse sparse-2 sparse-extents sparse-extents-2 sparse-to-pipe reflink-auto reflink-perm copy-FMR debug proc-short-read proc-zero-len"
 
 # script -> sprint whose machinery it waits for (DEFER, not failure).
 deferred_until() {
@@ -73,6 +73,21 @@ run_script() {
     mkdir -p "$d/tests" "$d/bin" "$d/sandbox"
     cp tests/gnu-mined/shim.sh "$d/tests/init.sh"
     ln -s "$rs_tool" "$d/bin/cp"
+    # other-fs-tmpdir helper (cross-fs scripts source it): the first
+    # writable CHOPIN_TEST_FSROOT hosts it, else the script skips.
+    {
+        printf '# shim: cross-fs scratch\n'
+        ofs=""
+        for r in ${CHOPIN_TEST_FSROOT:-}; do
+            [ -d "$r" ] && [ -w "$r" ] && { ofs="$r"; break; }
+        done
+        if [ -n "$ofs" ]; then
+            printf 'other_partition_tmpdir="%s/mined-ofs.$$"\n' "$ofs"
+            printf 'mkdir -p "$other_partition_tmpdir" || skip_ ofs\n'
+        else
+            printf 'skip_ "no second filesystem registered"\n'
+        fi
+    } > "$d/tests/other-fs-tmpdir"
     # Synthesized config header (catalog: scripts grep build defines).
     cat > "$d/confighdr" <<'HDR'
 #define HAVE_LINKAT 1
@@ -88,6 +103,7 @@ HDR
             HOME="$d/sandbox" \
             LC_ALL=C LANGUAGE=C TZ=UTC0 \
             srcdir="$d" \
+            abs_srcdir="$d" \
             CONFIG_HEADER="$d/confighdr" \
             sh "$corpus/$rs_script.sh"
     ) > "$d/log" 2>&1
