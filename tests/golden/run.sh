@@ -127,10 +127,18 @@ run_pinned() {
     )
 }
 
-# Normalize the leading program token of diagnostic lines so oracle
-# ("cp: ...") and UUT ("chopin: ..."/"cpn: ...") stderr compare.
+# Normalize the program token of diagnostic lines so oracle and UUT
+# stderr compare. Three classes (measured against the pinned oracle):
+# error()-class lines prefix the BASENAME ("cp: ...", "chopin: ...");
+# getopt-class lines prefix argv[0] VERBATIM (an absolute path under
+# run_pinned); the Try-help line embeds verbatim argv[0] in quotes.
 normprog() {
-    sed -e 's/^cp:/PROG:/' -e 's/^chopin:/PROG:/' -e 's/^cpn:/PROG:/'
+    sed \
+        -e 's|^[^:]*/*cp:|PROG:|' \
+        -e 's|^[^:]*/*gcp:|PROG:|' \
+        -e 's|^[^:]*/*chopin:|PROG:|' \
+        -e 's|^[^:]*/*cpn:|PROG:|' \
+        -e "s|^Try '[^']* --help' for more information\.|Try 'PROG --help' for more information.|"
 }
 
 # --- twin sandboxes --------------------------------------------------
@@ -335,9 +343,66 @@ fi
 selftest_cases=$cases
 echo "golden: run_case self-test passed ($selftest_cases cases)"
 
-# --- case matrix (arrives with sprint 02) ----------------------------
+# --- case matrix -----------------------------------------------------
+# Sprint 01: the error-wording tier. Operand-shape, conflict, and
+# argmatch errors byte-match the oracle (normprog'd). Copy cases
+# arrive with sprint 02.
 
-# run_case smoke-fresh "fresh single-file copy" ORDERED C 0 -- SRC/a.txt DST/fresh.txt
+run_case err-missing-all "no operands" ORDERED C 1 --
+run_case err-missing-dst "one operand" ORDERED C 1 -- onlyone
+run_case err-hard-sym "-l with -s" ORDERED C 1 -- -l -s SRC/a.txt DST/x
+run_case err-backup-n "-b with -n" ORDERED C 1 -- -b -n SRC/a.txt DST/x
+run_case err-n-backup "-n then -b" ORDERED C 1 -- -n -b SRC/a.txt DST/x
+run_case err-backup-nonefail "--backup with --update=none-fail" ORDERED C 1 \
+    -- --backup --update=none-fail SRC/a.txt DST/x
+run_case err-reflink-sparse "--reflink=always --sparse=never" ORDERED C 1 \
+    -- --reflink=always --sparse=never SRC/a.txt DST/x
+run_case err-reflink-sparse-always "--reflink --sparse=always" ORDERED C 1 \
+    -- --reflink --sparse=always SRC/a.txt DST/x
+run_case err-sparse-amb "--sparse=a ambiguous" ORDERED C 1 \
+    -- --sparse=a SRC/a.txt DST/x
+run_case err-sparse-amb-utf8 "--sparse=a ambiguous, UTF-8 quotes" \
+    ORDERED en_US.UTF-8 1 -- --sparse=a SRC/a.txt DST/x
+run_case err-sparse-inv "--sparse=bogus invalid" ORDERED C 1 \
+    -- --sparse=bogus SRC/a.txt DST/x
+run_case err-update-amb "--update=n ambiguous" ORDERED C 1 \
+    -- --update=n SRC/a.txt DST/x
+run_case err-update-non "--update=non ambiguous" ORDERED C 1 \
+    -- --update=non SRC/a.txt DST/x
+run_case err-backup-word "--backup=n ambiguous" ORDERED C 1 \
+    -- --backup=n SRC/a.txt DST/x
+run_case err-preserve-empty "--preserve trailing comma" ORDERED C 1 \
+    -- --preserve=mode, SRC/a.txt DST/x
+run_case err-preserve-inv "--preserve=bogus" ORDERED C 1 \
+    -- --preserve=bogus SRC/a.txt DST/x
+run_case err-nopreserve-list "--no-preserve list invalid tail" ORDERED C 1 \
+    -- --no-preserve=mode,bogus SRC/a.txt DST/x
+run_case err-preserve-ctx "--preserve=context non-selinux" ORDERED C 1 \
+    -- --preserve=context SRC/a.txt DST/x
+run_case err-long-amb "--p ambiguous" ORDERED C 1 -- --p SRC/a.txt DST/x
+run_case err-long-amb-no "--no ambiguous" ORDERED C 1 -- --no SRC/a.txt DST/x
+run_case err-long-unrec "unrecognized long" ORDERED C 1 \
+    -- --bogus SRC/a.txt DST/x
+run_case err-short-inv "invalid short" ORDERED C 1 -- -q SRC/a.txt DST/x
+run_case err-long-noarg "--link takes no argument" ORDERED C 1 \
+    -- --link=x SRC/a.txt DST/x
+run_case err-long-reqarg "--suffix requires argument" ORDERED C 1 -- --suffix
+run_case err-sparse-noarg "--sparse requires argument at argv end" \
+    ORDERED C 1 -- SRC/a.txt DST/x --sparse
+run_case err-t-T "-t with -T" ORDERED C 1 -- -t DST -T SRC/a.txt DST/x
+run_case err-extra-T "-T extra operand" ORDERED C 1 \
+    -- -T SRC/a.txt DST/x DST/y
+run_case err-multi-t "duplicate -t" ORDERED C 1 -- -t DST -t DST SRC/a.txt
+run_case err-t-missing "-t nonexistent dir" ORDERED C 1 \
+    -- -t no-such-dir SRC/a.txt
+run_case err-t-notdir "-t non-directory" ORDERED C 1 \
+    -- -t SRC/a.txt SRC/sub/b.txt
+run_case err-3op-notdir "three operands last not dir" ORDERED C 1 \
+    -- SRC/a.txt SRC/sub/b.txt no-such-target
+run_case err-parents-nondir "--parents non-dir dest" ORDERED C 1 \
+    -- --parents SRC/a.txt no-such-dest
+# --context=ctx warn-then-successful-copy joins in sprint 02 (the
+# oracle proceeds to copy; interim chopin cannot). Unit-covered now.
 
 # --- summary ---------------------------------------------------------
 
