@@ -45,11 +45,14 @@ else
 fi
 
 # --- Manifest tool: build with the strict flag set, then self-test.
+# Compiles to its OWN artifact (build/manifest-unittest): build/manifest
+# belongs to the Makefile and the golden tier may be executing it right
+# now (parallel check).
 cc_bin=$(sed -n 's/^CC ?= //p' config.mk)
 extra=$(sed -n 's/^EXTRA_CPPFLAGS = //p' config.mk)
 mkdir -p build
 if ! "$cc_bin" -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 $extra \
-    -I. -Wall -Wextra -Werror -o build/manifest tests/manifest.c; then
+    -I. -Wall -Wextra -Werror -o build/manifest-unittest tests/manifest.c; then
     bad "manifest tool does not compile -Werror clean"
 else
     note "ok: manifest tool compiles"
@@ -75,8 +78,8 @@ else
     mktree "$work/t1"
     mktree "$work/t2"
 
-    build/manifest "$work/t1" > "$work/m1" || bad "manifest t1 exited nonzero"
-    build/manifest "$work/t2" > "$work/m2" || bad "manifest t2 exited nonzero"
+    build/manifest-unittest "$work/t1" > "$work/m1" || bad "manifest t1 exited nonzero"
+    build/manifest-unittest "$work/t2" > "$work/m2" || bad "manifest t2 exited nonzero"
     if cmp -s "$work/m1" "$work/m2"; then
         note "ok: identical trees -> identical manifests"
     else
@@ -86,7 +89,7 @@ else
 
     # 1-bit content change -> exactly the changed file's line differs.
     printf 'Alpha\n' > "$work/t2/a.txt"
-    build/manifest "$work/t2" > "$work/m3" || bad "manifest t2v2 nonzero"
+    build/manifest-unittest "$work/t2" > "$work/m3" || bad "manifest t2v2 nonzero"
     if cmp -s "$work/m1" "$work/m3"; then
         bad "content change did not change the manifest"
     else
@@ -116,7 +119,7 @@ else
         && note "ok: fifo typed p" || bad "fifo line wrong"
 
     # -t appends an mtime column for f/d/l.
-    build/manifest -t "$work/t1" > "$work/mt" || bad "manifest -t nonzero"
+    build/manifest-unittest -t "$work/t1" > "$work/mt" || bad "manifest -t nonzero"
     grep -q '^a.txt f .* [0-9][0-9]*\.[0-9]\{9\}$' "$work/mt" \
         && note "ok: -t emits mtime column" \
         || { bad "-t mtime column wrong"; grep '^a.txt' "$work/mt"; }
@@ -124,7 +127,7 @@ else
     # -x digests user.* xattrs where the tools and fs allow.
     if command -v setfattr >/dev/null 2>&1 \
         && setfattr -n user.chopin -v hello "$work/t1/a.txt" 2>/dev/null; then
-        build/manifest -x "$work/t1" > "$work/mx" || bad "manifest -x nonzero"
+        build/manifest-unittest -x "$work/t1" > "$work/mx" || bad "manifest -x nonzero"
         grep -q '^a.txt f .* user.chopin=[0-9a-f]\{16\}$' "$work/mx" \
             && note "ok: -x digests user.* xattrs" \
             || { bad "-x xattr digest wrong"; grep '^a.txt' "$work/mx"; }
@@ -133,7 +136,7 @@ else
     fi
 
     # Determinism: a second run is byte-identical.
-    build/manifest "$work/t1" > "$work/m1b" || bad "manifest rerun nonzero"
+    build/manifest-unittest "$work/t1" > "$work/m1b" || bad "manifest rerun nonzero"
     cmp -s "$work/m1" "$work/m1b" \
         && note "ok: manifest run is deterministic" \
         || bad "manifest nondeterministic across runs"

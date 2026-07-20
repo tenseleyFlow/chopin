@@ -39,12 +39,17 @@ config.mk config.h: configure
 
 check: unit golden fuzz-smoke perf-smoke
 
-unit: all
+# The manifest tool is shared by the unit and golden tiers; make owns
+# the build so parallel `make check` cannot race on the artifact.
+build/manifest: tests/manifest.c config.h
+	@mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-missing-prototypes -o $@ tests/manifest.c
+
+unit: all build/manifest
 	sh tests/unit/run.sh
 
-# Guard drops in 00C when the harness lands.
-golden: all
-	@test ! -f tests/golden/run.sh || sh tests/golden/run.sh || test $$? -eq 77
+golden: all build/manifest
+	sh tests/golden/run.sh || test $$? -eq 77
 
 # fuzz lands in sprint 08, perf smoke in sprint 10; tolerate absence
 # until then so `make check` is runnable from the first commit.
