@@ -12,6 +12,7 @@
 #include "config.h"
 #include "copydata.h"
 #include "meta.h"
+#include "forcelink.h"
 #include "hashes.h"
 #include "quote.h"
 #include "util.h"
@@ -40,6 +41,10 @@ last_component_of(const char *name)
    the regular-file command-line path with the scalar engine. Backup
    machinery, hash-table guards, link/dir/special dispatch, and the
    metadata engine arrive in sprints 03-07; their sites are marked. */
+
+/* linkat(0 flags) links the symlink itself on Linux/macOS/FreeBSD
+   (POSIX 2008 default). */
+#define CHOPIN_CAN_HARDLINK_SYMLINKS 1
 
 #define SAME_INODE(a, b) \
     ((a).st_ino == (b).st_ino && (a).st_dev == (b).st_dev)
@@ -275,6 +280,56 @@ source_is_dst_backup(const char *srcbase, const struct stat *src_st,
     st = fstatat(dst_dirfd, dst_back, &dst_back_sb, 0);
     free(dst_back);
     return st == 0 && SAME_INODE(*src_st, dst_back_sb);
+}
+
+/* copy.c:1547-1570: link via the force protocol; verbose prints
+   removed %s when an existing dest was atomically replaced. */
+static bool
+create_hard_link(const char *src_name,
+                 int src_dirfd, const char *src_relname,
+                 const char *dst_name,
+                 int dst_dirfd, const char *dst_relname,
+                 bool replace, bool verbose, bool dereference)
+{
+    int err = chopin_force_linkat(src_dirfd, src_relname,
+                                  dst_dirfd, dst_relname,
+                                  dereference ? AT_SYMLINK_FOLLOW : 0,
+                                  replace);
+    if (err > 0) {
+        chopin_error(err, "cannot create hard link %s to %s",
+                     chopin_quoteaf_n(0, dst_name),
+                     chopin_quoteaf_n(1, src_name));
+        return false;
+    }
+    if (err < 0 && verbose)
+        printf("removed %s\n", chopin_quoteaf(dst_name));
+    return true;
+}
+
+/* areadlink: readlink with the stat-size hint, growing on
+   truncation. */
+static char *
+areadlink_with_size(const char *name, size_t hint)
+{
+    size_t cap = hint ? hint + 1 : 128;
+
+    for (;;) {
+        char *buf = chopin_xmalloc(cap);
+        ssize_t n = readlink(name, buf, cap);
+
+        if (n < 0) {
+            int save = errno;
+            free(buf);
+            errno = save;
+            return NULL;
+        }
+        if ((size_t)n < cap) {
+            buf[n] = '\0';
+            return buf;
+        }
+        free(buf);
+        cap *= 2;
+    }
 }
 
 /* copy.c:1400-1410. */
@@ -583,7 +638,11 @@ chopin_copy(const char *src_name, const char *dst_name,
     }
 
     /* Item 5: dst stat policy. */
-    bool use_lstat = x->symbolic_link || x->hard_link
+    bool use_lstat =
+        (!S_ISREG(src_sb.st_mode)
+         && (!x->copy_as_regular
+             || S_ISDIR(src_sb.st_mode) || S_ISLNK(src_sb.st_mode)))
+        || x->symbolic_link || x->hard_link
         || x->backup_type != CHOPIN_BACKUP_NONE
         || x->unlink_dest_before_opening;
 
@@ -724,9 +783,13 @@ chopin_copy(const char *src_name, const char *dst_name,
             new_dst = true;
         }
 
-        /* Unlink-before (2.1 item 6 tail; the preserve_links and
-           DEREF_NEVER arms complete in sprint 05). */
-        if (!S_ISDIR(dst_sb.st_mode) && x->unlink_dest_before_opening) {
+        /* Unlink-before, complete (copy.c:1966-1984). */
+        if (!S_ISDIR(dst_sb.st_mode)
+            && (x->unlink_dest_before_opening
+                || (x->data_copy_required
+                    && ((x->preserve_links && 1 < dst_sb.st_nlink)
+                        || (x->dereference == CHOPIN_DEREF_NEVER
+                            && !S_ISREG(src_sb.st_mode)))))) {
             if (unlinkat(dst_dirfd, dst_relname, 0) != 0) {
                 chopin_error(errno, "cannot remove %s",
                              chopin_quoteaf(dst_name));
@@ -751,36 +814,195 @@ chopin_copy(const char *src_name, const char *dst_name,
     }
 
     bool ok = true;
+    bool dest_is_symlink = false;
+    const char *earlier_file = NULL;
 
-    /* Items 9-11: hard-link bookkeeping and earlier-file hits are
-       sprints 05/06; -l/-s dispatch is sprint 05. */
-    if (x->hard_link || x->symbolic_link) {
-        chopin_error(0, "internal: -l/-s dispatch arrives in sprint 05");
-        ok = false;
-    } else if (S_ISLNK(src_sb.st_mode)) {
-        chopin_error(0, "internal: symlink copying arrives in sprint 05");
-        ok = false;
+    /* Item 9 (copy.c:2066-2075): record multi-link sources under
+       --preserve=links (dir bookkeeping is sprint 06). */
+    if (!S_ISDIR(src_sb.st_mode)
+        && x->preserve_links && !x->hard_link
+        && (1 < src_sb.st_nlink
+            || (command_line_arg
+                && x->dereference == CHOPIN_DEREF_COMMAND_LINE_ARGUMENTS)
+            || x->dereference == CHOPIN_DEREF_ALWAYS))
+        earlier_file = chopin_remember_copied(dst_name, src_sb.st_dev,
+                                              src_sb.st_ino);
+
+    /* Item 10 (2134-2142): a non-dir earlier hit hard-links the
+       first dest over this one. */
+    if (earlier_file != NULL) {
+        if (!create_hard_link(earlier_file, AT_FDCWD, earlier_file,
+                              dst_name, dst_dirfd, dst_relname,
+                              true, x->verbose,
+                              should_dereference(x, command_line_arg))) {
+            free(dst_backup);
+            return false;
+        }
+        free(dst_backup);
+        return true;
+    }
+
+    /* Item 14: type dispatch (copy.c:2420-2596). */
+    if (x->symbolic_link) {
+        dest_is_symlink = true;
+        if (*src_name != '/') {
+            /* Relative sources demand the dest in the CWD (quirk 4,
+               quotef wording). */
+            struct stat dot_sb, dst_parent_sb;
+            const char *slash = strrchr(dst_relname, '/');
+            char parent[4096];
+            bool in_current_dir;
+
+            if (slash == NULL)
+                strcpy(parent, ".");
+            else {
+                size_t n = (size_t)(slash - dst_relname);
+                if (n >= sizeof parent)
+                    n = sizeof parent - 1;
+                if (n == 0)
+                    n = 1;      /* "/x" -> "/" */
+                memcpy(parent, dst_relname,
+                       n == 1 && dst_relname[0] == '/' ? 1 : n);
+                parent[n] = '\0';
+            }
+            in_current_dir =
+                (dst_dirfd == AT_FDCWD && strcmp(parent, ".") == 0)
+                || stat(".", &dot_sb) != 0
+                || fstatat(dst_dirfd, parent, &dst_parent_sb, 0) != 0
+                || SAME_INODE(dot_sb, dst_parent_sb);
+            if (!in_current_dir) {
+                chopin_error(0, "%s: can make relative symbolic links "
+                                "only in current directory",
+                             chopin_quotef(dst_name));
+                ok = false;
+                goto tail;
+            }
+        }
+        int err = chopin_force_symlinkat(src_name, dst_dirfd, dst_relname,
+                                         x->unlink_dest_after_failed_open);
+        if (err > 0) {
+            chopin_error(err, "cannot create symbolic link %s to %s",
+                         chopin_quoteaf_n(0, dst_name),
+                         chopin_quoteaf_n(1, src_name));
+            ok = false;
+            goto tail;
+        }
+    } else if (x->hard_link
+               && !(S_ISLNK(src_sb.st_mode)
+                    && x->dereference == CHOPIN_DEREF_NEVER
+                    && !CHOPIN_CAN_HARDLINK_SYMLINKS)) {
+        bool replace = x->unlink_dest_after_failed_open
+            || x->interactive == CHOPIN_I_ASK_USER;
+        if (!create_hard_link(src_name, AT_FDCWD, src_name,
+                              dst_name, dst_dirfd, dst_relname,
+                              replace, false,
+                              should_dereference(x, command_line_arg))) {
+            ok = false;
+            goto tail;
+        }
     } else if (S_ISREG(src_sb.st_mode)
                || (x->copy_as_regular && !S_ISLNK(src_sb.st_mode))) {
         /* Item 12 (copy.c:2288-2297): preserving ownership narrows
            group/other at creation; the metadata tail re-widens
-           through the umask. Item 14: regular dispatch (or
-           copy_as_regular: special files read as data without -R,
-           quirk 13). */
+           through the umask. copy_as_regular: special files read as
+           data without -R (quirk 13). */
         mode_t dst_mode_bits = src_sb.st_mode & 07777;
         mode_t omitted = x->preserve_ownership
             ? (dst_mode_bits & (S_IRWXG | S_IRWXO)) : 0;
 
         ok = copy_reg(src_name, dst_name, dst_dirfd, dst_relname, x,
                       dst_mode_bits, omitted, &new_dst, &src_sb);
+    } else if (S_ISLNK(src_sb.st_mode)) {
+        char *src_link_val =
+            areadlink_with_size(src_name, (size_t)src_sb.st_size);
+
+        dest_is_symlink = true;
+        if (src_link_val == NULL) {
+            chopin_error(errno, "cannot read symbolic link %s",
+                         chopin_quoteaf(src_name));
+            ok = false;
+            goto tail;
+        }
+        int symlink_err = chopin_force_symlinkat(
+            src_link_val, dst_dirfd, dst_relname,
+            x->unlink_dest_after_failed_open);
+        /* DEV-003, kept quirk: --update=older treats an identical
+           existing dest symlink as success (copy.c:2541-2557; GNU's
+           own comment doubts it). */
+        if (symlink_err > 0 && x->update == CHOPIN_UPDATE_OLDER
+            && !new_dst && have_dst_sb && S_ISLNK(dst_sb.st_mode)
+            && (size_t)dst_sb.st_size == strlen(src_link_val)) {
+            char dest_val[4096];
+            ssize_t n = readlinkat(dst_dirfd, dst_relname, dest_val,
+                                   sizeof dest_val - 1);
+            if (n >= 0) {
+                dest_val[n] = '\0';
+                if (strcmp(dest_val, src_link_val) == 0)
+                    symlink_err = 0;
+            }
+        }
+        if (symlink_err > 0) {
+            chopin_error(symlink_err, "cannot create symbolic link %s",
+                         chopin_quoteaf(dst_name));
+            free(src_link_val);
+            ok = false;
+            goto tail;
+        }
+        free(src_link_val);
+
+        if (x->preserve_ownership) {
+            if (fchownat(dst_dirfd, dst_relname, src_sb.st_uid,
+                         src_sb.st_gid, AT_SYMLINK_NOFOLLOW) != 0
+                && !chopin_chown_failure_ok()) {
+                /* DEV-002: GNU prints dst_name UNQUOTED here
+                   (copy.c:2579-2580); chopin quotes it. */
+                chopin_error(errno, "failed to preserve ownership "
+                                    "for %s", chopin_quoteaf(dst_name));
+                if (x->require_preserve) {
+                    ok = false;
+                    goto tail;
+                }
+            }
+        }
     } else {
         chopin_error(0, "internal: special-file dispatch arrives in "
                         "sprint 06");
         ok = false;
     }
 
+    /* Name-based metadata for symlink dests: timestamps with
+       NOFOLLOW (3.2); ownership was in-branch; mode never applies
+       to symlinks; symlink xattrs cannot carry user.* on Linux. */
+    if (ok && dest_is_symlink && x->preserve_timestamps) {
+        struct timespec ts[2];
+
+#if CHOPIN_HAVE_ST_MTIM
+        ts[0] = src_sb.st_atim;
+        ts[1] = src_sb.st_mtim;
+#elif CHOPIN_HAVE_ST_MTIMESPEC
+        ts[0] = src_sb.st_atimespec;
+        ts[1] = src_sb.st_mtimespec;
+#else
+        ts[0].tv_sec = src_sb.st_atime;
+        ts[0].tv_nsec = 0;
+        ts[1].tv_sec = src_sb.st_mtime;
+        ts[1].tv_nsec = 0;
+#endif
+        if (utimensat(dst_dirfd, dst_relname, ts,
+                      AT_SYMLINK_NOFOLLOW) != 0) {
+            chopin_error(errno, "preserving times for %s",
+                         chopin_quoteaf(dst_name));
+            if (x->require_preserve)
+                ok = false;
+        }
+    }
+
+tail:
     /* Item 16 (un_backup, copy.c:2747-2773): a failed copy restores
-       the backup over the dest. */
+       the backup over the dest; forget the src_to_dest entry unless
+       the failure WAS the earlier-file link (copy.c:2760). */
+    if (!ok && earlier_file == NULL)
+        chopin_forget_created(src_sb.st_dev, src_sb.st_ino);
     if (!ok && dst_backup) {
         const char *relbackup = dst_backup
             + (strlen(dst_name) - strlen(dst_relname));
