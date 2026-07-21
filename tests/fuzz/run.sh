@@ -27,24 +27,34 @@ cd "$root"
 
 trials="${FUZZ_TRIALS:-100}"
 seed="${FUZZ_SEED:-42}"
+# FUZZ_IDENTITY=1 (sprint 09C): A = chopin serial, B = chopin
+# parallel with a seed-derived worker count (FUZZ_CHUNKS=1 also
+# forces chunked dispatch at a 4K threshold). Same binary both
+# sides, so every stream and the manifest compare BYTE-EXACT - no
+# sorting, no normalization, no deviation filter, no oracle needed.
+identity="${FUZZ_IDENTITY:-0}"
 
 if [ "$(id -u)" = 0 ]; then
     echo "fuzz: SKIPPED - refusing to run as root" >&2
     exit 77
 fi
 
-oracle=$(sh scripts/find-gnu-cp.sh) || {
-    echo "fuzz: no oracle; skipping (77)" >&2
-    exit 77
-}
-case $("$oracle" --version | sed -n 1p) in
-*" 9.11") ;;
-*) echo "fuzz: oracle not the 9.11 pin; skipping (77)" >&2; exit 77 ;;
-esac
-if [ "$oracle" != "$root/build/gnu-cp/src/cp" ] \
-    && [ "${CHOPIN_ORACLE_STRICT:-}" != 1 ]; then
-    echo "fuzz: oracle not the feature-pinned build; skipping (77)" >&2
-    exit 77
+if [ "$identity" = 1 ]; then
+    oracle="$root/chopin"
+else
+    oracle=$(sh scripts/find-gnu-cp.sh) || {
+        echo "fuzz: no oracle; skipping (77)" >&2
+        exit 77
+    }
+    case $("$oracle" --version | sed -n 1p) in
+    *" 9.11") ;;
+    *) echo "fuzz: oracle not the 9.11 pin; skipping (77)" >&2; exit 77 ;;
+    esac
+    if [ "$oracle" != "$root/build/gnu-cp/src/cp" ] \
+        && [ "${CHOPIN_ORACLE_STRICT:-}" != 1 ]; then
+        echo "fuzz: oracle not the feature-pinned build; skipping (77)" >&2
+        exit 77
+    fi
 fi
 
 manifest="$root/build/manifest"
@@ -291,8 +301,24 @@ while [ "$t" -le "$trials" ]; do
     build_sandbox "$tdir/A" "$tdir/plan"
     build_sandbox "$tdir/B" "$tdir/plan"
 
+    # Identity mode: serial vs parallel, worker count derived from
+    # (seed, trial) so campaigns sweep the pool-size space.
+    if [ "$identity" = 1 ]; then
+        idw=$(( (seed * 7 + t * 13) % 15 + 2 ))
+        a_env="CHOPIN_PARALLEL_WORKERS=0"
+        b_env="CHOPIN_PARALLEL_MIN=1 CHOPIN_PARALLEL_WORKERS=$idw"
+        if [ "${FUZZ_CHUNKS:-0}" = 1 ]; then
+            b_env="$b_env CHOPIN_PARALLEL_CHUNKS=1"
+            b_env="$b_env CHOPIN_CHUNK_THRESHOLD=65536"
+        fi
+    else
+        a_env=""
+        b_env=""
+    fi
+
     for side in A B; do
         if [ "$side" = A ]; then tool="$oracle"; else tool="$root/chopin"; fi
+        if [ "$side" = A ]; then side_env=$a_env; else side_env=$b_env; fi
         (
             cd "$tdir/$side" || exit 99
             umask 022
@@ -305,17 +331,18 @@ while [ "$t" -le "$trials" ]; do
             # multi-prompt trials diverge on traversal order (which
             # file consumed the answer differs) - `yes` keeps the
             # decision set order-independent.
+            # shellcheck disable=SC2086
             if [ "$ans" = none ]; then
                 env -i \
                     PATH="/usr/bin:/bin" HOME="$tdir/$side" \
                     LC_ALL=C LANGUAGE=C TZ=UTC0 \
-                    CHOPIN_DEBUG_VERIFY=1 \
+                    CHOPIN_DEBUG_VERIFY=1 $side_env \
                     "$tool" "$@" < /dev/null
             else
                 yes "$ans" 2>/dev/null | env -i \
                     PATH="/usr/bin:/bin" HOME="$tdir/$side" \
                     LC_ALL=C LANGUAGE=C TZ=UTC0 \
-                    CHOPIN_DEBUG_VERIFY=1 \
+                    CHOPIN_DEBUG_VERIFY=1 $side_env \
                     "$tool" "$@"
             fi
         ) > "$tdir/$side.out" 2> "$tdir/$side.err"
@@ -326,28 +353,36 @@ while [ "$t" -le "$trials" ]; do
     ok=1
     [ "$(cat "$tdir/A.rc")" = "$(cat "$tdir/B.rc")" ] || ok=0
     cmp -s "$tdir/A.man" "$tdir/B.man" || ok=0
-    sort "$tdir/A.out" > "$tdir/A.out.s"
-    sort "$tdir/B.out" > "$tdir/B.out.s"
-    cmp -s "$tdir/A.out.s" "$tdir/B.out.s" || ok=0
-    # Normalize BEFORE sorting: prompt-splitting creates the lines the
-    # sort must order (a glued prompt line sorts as one unit
-    # otherwise - fuzz 1234-126).
-    normprog < "$tdir/A.err" | apply_deviation_filter | sort \
-        > "$tdir/A.err.s"
-    normprog < "$tdir/B.err" | apply_deviation_filter | sort \
-        > "$tdir/B.err.s"
-    cmp -s "$tdir/A.err.s" "$tdir/B.err.s" || ok=0
-
-    # Into-self partial trees are order-dependent (overview s2
-    # corollary): when BOTH tools diagnosed into-itself, compare only
-    # streams and rc.
-    if [ "$ok" = 0 ] \
-        && grep -q 'into itself' "$tdir/A.err" \
-        && grep -q 'into itself' "$tdir/B.err"; then
-        ok=1
-        [ "$(cat "$tdir/A.rc")" = "$(cat "$tdir/B.rc")" ] || ok=0
+    if [ "$identity" = 1 ]; then
+        # Same binary both sides: every byte in order, both streams.
+        cp "$tdir/A.out" "$tdir/A.out.s"; cp "$tdir/B.out" "$tdir/B.out.s"
+        cp "$tdir/A.err" "$tdir/A.err.s"; cp "$tdir/B.err" "$tdir/B.err.s"
+        cmp -s "$tdir/A.out" "$tdir/B.out" || ok=0
+        cmp -s "$tdir/A.err" "$tdir/B.err" || ok=0
+    else
+        sort "$tdir/A.out" > "$tdir/A.out.s"
+        sort "$tdir/B.out" > "$tdir/B.out.s"
         cmp -s "$tdir/A.out.s" "$tdir/B.out.s" || ok=0
+        # Normalize BEFORE sorting: prompt-splitting creates the lines
+        # the sort must order (a glued prompt line sorts as one unit
+        # otherwise - fuzz 1234-126).
+        normprog < "$tdir/A.err" | apply_deviation_filter | sort \
+            > "$tdir/A.err.s"
+        normprog < "$tdir/B.err" | apply_deviation_filter | sort \
+            > "$tdir/B.err.s"
         cmp -s "$tdir/A.err.s" "$tdir/B.err.s" || ok=0
+
+        # Into-self partial trees are order-dependent (overview s2
+        # corollary): when BOTH tools diagnosed into-itself, compare
+        # only streams and rc.
+        if [ "$ok" = 0 ] \
+            && grep -q 'into itself' "$tdir/A.err" \
+            && grep -q 'into itself' "$tdir/B.err"; then
+            ok=1
+            [ "$(cat "$tdir/A.rc")" = "$(cat "$tdir/B.rc")" ] || ok=0
+            cmp -s "$tdir/A.out.s" "$tdir/B.out.s" || ok=0
+            cmp -s "$tdir/A.err.s" "$tdir/B.err.s" || ok=0
+        fi
     fi
 
     if [ "$ok" = 0 ]; then
@@ -366,6 +401,9 @@ while [ "$t" -le "$trials" ]; do
     t=$((t + 1))
 done
 
-echo "fuzz: $trials trials, $fails failures (seed $seed)"
+mode=fuzz
+[ "$identity" = 1 ] && mode=identity
+[ "${FUZZ_CHUNKS:-0}" = 1 ] && mode="$mode+chunks"
+echo "$mode: $trials trials, $fails failures (seed $seed)"
 [ "$fails" -eq 0 ] || exit 1
 exit 0

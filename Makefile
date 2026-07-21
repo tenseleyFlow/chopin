@@ -49,7 +49,7 @@ config.mk config.h: configure
 %.o: %.c config.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-check: unit golden mined fuzz-smoke perf-smoke
+check: unit golden mined fuzz-smoke identity-smoke perf-smoke
 
 mined: all
 	sh tests/gnu-mined/run.sh || test $$? -eq 77
@@ -77,6 +77,17 @@ fuzz: all
 	FUZZ_TRIALS=200 FUZZ_SEED=7 sh tests/fuzz/run.sh
 	FUZZ_TRIALS=200 FUZZ_SEED=1234 sh tests/fuzz/run.sh
 
+# Sprint 09C identity proof: parallel == serial byte-for-byte (both
+# streams + manifest + rc), random worker counts, chunked lane
+# included. Needs no oracle - runs on every platform.
+identity-smoke: all
+	FUZZ_IDENTITY=1 FUZZ_TRIALS=25 FUZZ_SEED=9001 sh tests/fuzz/run.sh || test $$? -eq 77
+
+identity: all
+	FUZZ_IDENTITY=1 FUZZ_TRIALS=200 FUZZ_SEED=9101 sh tests/fuzz/run.sh
+	FUZZ_IDENTITY=1 FUZZ_TRIALS=200 FUZZ_SEED=9102 sh tests/fuzz/run.sh
+	FUZZ_IDENTITY=1 FUZZ_CHUNKS=1 FUZZ_TRIALS=200 FUZZ_SEED=9103 sh tests/fuzz/run.sh
+
 perf-smoke: all
 	@test ! -f bench/run-smoke.sh || sh bench/run-smoke.sh || test $$? -eq 77
 
@@ -93,6 +104,8 @@ tsan:
 	$(MAKE) all CFLAGS='$(CFLAGS) -fsanitize=thread' LDFLAGS='$(LDFLAGS) -fsanitize=thread'
 	CHOPIN_PARALLEL_MIN=1 sh tests/golden/run.sh || test $$? -eq 77
 	@test ! -f tests/fuzz/run.sh || FUZZ_TRIALS=10 CHOPIN_PARALLEL_MIN=1 sh tests/fuzz/run.sh || test $$? -eq 77
+	FUZZ_IDENTITY=1 FUZZ_TRIALS=10 FUZZ_SEED=9001 sh tests/fuzz/run.sh
+	FUZZ_IDENTITY=1 FUZZ_CHUNKS=1 FUZZ_TRIALS=10 FUZZ_SEED=9002 sh tests/fuzz/run.sh
 	$(MAKE) clean
 	$(MAKE) all
 
@@ -120,7 +133,7 @@ distclean: clean
 	rm -f config.h config.mk chopin-*.tar.gz
 	rm -rf build
 
-.PHONY: all check unit golden fuzz fuzz-smoke perf-smoke sanitize dist \
-	distcheck install clean distclean
+.PHONY: all check unit golden fuzz fuzz-smoke identity identity-smoke \
+	perf-smoke sanitize tsan dist distcheck install clean distclean
 
 -include $(DEP)
