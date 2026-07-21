@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/types.h>
 
 /* cp has only two exit statuses (gnu-cp-analysis.md 4.1). */
 enum { CHOPIN_STATUS_OK = 0, CHOPIN_STATUS_FAIL = 1 };
@@ -57,5 +58,9 @@ void chopin_errcap_flush(struct chopin_errcap *cap);    /* to stderr */
 void *chopin_xmalloc(size_t n);
 void *chopin_xrealloc(void *p, size_t n);
 char *chopin_xstrdup(const char *s);
+
+/* Cached euid (never changes; GNU calls geteuid once per run, the
+   uncached version showed up 2000x on the hardlink lane). */
+uid_t chopin_euid(void);
 
 #endif

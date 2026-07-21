@@ -13,11 +13,18 @@
    arrive in sprints 05/06.
 
    Returns false when the FILE must fail (require_preserve semantics);
-   soft failures diagnose and continue. */
+   soft failures diagnose and continue.
+
+   cur_sb, when non-NULL, is the dest's CURRENT stat: ownership is
+   skipped when it already matches the source (GNU copy.c:1071
+   SAME_OWNER_AND_GROUP guard - "avoid calling chown if we know it's
+   not necessary"). NULL preserves the always-chown behavior (GNU's
+   new-dir site). */
 bool chopin_apply_meta_fd(int src_fd, const char *src_name,
                           int dest_fd, const char *dst_name,
                           const struct stat *src_sb,
-                          const struct stat *dst_sb, bool new_dst,
+                          const struct stat *dst_sb,
+                          const struct stat *cur_sb, bool new_dst,
                           mode_t dst_mode, mode_t omitted_permissions,
                           mode_t extra_permissions,
                           const struct chopin_options *x);

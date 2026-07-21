@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
 
@@ -247,4 +248,17 @@ chopin_xstrdup(const char *s)
     char *p = chopin_xmalloc(n);
     memcpy(p, s, n);
     return p;
+}
+
+uid_t
+chopin_euid(void)
+{
+    static uid_t euid;
+    static bool cached;
+
+    if (!cached) {          /* primed via chopin_copy_init pre-pool */
+        euid = geteuid();
+        cached = true;
+    }
+    return euid;
 }

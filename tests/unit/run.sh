@@ -247,9 +247,11 @@ else
     note "skip: quirk-18 differential (no mkfifo or non-pinned oracle)"
 fi
 
-# --- Metadata order pin (sprint 04A): utimensat before fchown before
-# fsetxattr before fchmod under -a. strace is Linux-lane-only; clean
-# skip elsewhere (sprint 04 scoping rule).
+# --- Metadata order pin (sprint 04A): utimensat before [fchown]
+# before fsetxattr before fchmod under -a. fchown is OPTIONAL since
+# sprint 10B ports GNU's SAME_OWNER_AND_GROUP skip (copy.c:1071) -
+# a same-owner copy legitimately performs no chown; when present it
+# must sit between times and xattrs. strace is Linux-lane-only.
 if command -v strace >/dev/null 2>&1 && command -v setfattr >/dev/null 2>&1; then
     mw=$(mktemp -d "${TMPDIR:-/tmp}/chopin-order.XXXXXX")
     printf 'x\n' > "$mw/s"; chmod 750 "$mw/s"
@@ -259,7 +261,8 @@ if command -v strace >/dev/null 2>&1 && command -v setfattr >/dev/null 2>&1; the
         seq=$(grep -oE '(utimensat|fchown|fsetxattr|fchmod)\(' "$mw/tr" \
             | tr -d '(' | uniq | tr '\n' ' ')
         case "$seq" in
-        *"utimensat fchown fsetxattr fchmod"*)
+        *"utimensat fchown fsetxattr fchmod"* | \
+        *"utimensat fsetxattr fchmod"*)
             note "ok: metadata order strace-pinned ($seq)" ;;
         *)
             bad "metadata syscall order wrong: $seq" ;;

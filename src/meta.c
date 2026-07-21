@@ -35,7 +35,7 @@ bool
 chopin_chown_failure_ok(void)
 {
     return (errno == EPERM || errno == EINVAL || errno == EACCES)
-        && geteuid() != 0;
+        && chopin_euid() != 0;
 }
 
 /* set_owner (copy.c:482-534) reduced to the non-ACL build: pre-narrow
@@ -92,8 +92,10 @@ copy_xattrs_fd(int src_fd, const char *src_name, int dest_fd,
     bool all_errors = !x->data_copy_required || x->require_preserve_xattr;
     bool some_errors = !all_errors && !x->reduce_diagnostics;
     bool ok = true;
+    /* Both stack-local: xattr copying runs on pool workers under -a
+       (a static value buffer would race). */
     char names[65536];
-    static char value[65536];
+    char value[65536];
     ssize_t len = flistxattr(src_fd, names, sizeof names);
 
     if (len < 0) {
@@ -244,7 +246,7 @@ chopin_apply_meta_dir(const char *src_name, int dst_dirfd,
         x_local.explicit_no_preserve_mode = false;
         x_local.preserve_mode = false;
         ok = chopin_apply_meta_fd(sfd, src_name, dfd, dst_name, src_sb,
-                                  NULL, new_dst, dst_mode, 0, 0,
+                                  NULL, NULL, new_dst, dst_mode, 0, 0,
                                   &x_local);
         if (fstat(dfd, &cur) != 0
             || fchmod(dfd, (0777 & ~chopin_cached_umask())
@@ -256,7 +258,7 @@ chopin_apply_meta_dir(const char *src_name, int dst_dirfd,
         }
     } else {
         ok = chopin_apply_meta_fd(sfd, src_name, dfd, dst_name, src_sb,
-                                  NULL, new_dst, dst_mode,
+                                  NULL, NULL, new_dst, dst_mode,
                                   omitted_permissions,
                                   restore_mode ? S_IRWXU : 0, x);
     }
@@ -270,7 +272,8 @@ bool
 chopin_apply_meta_fd(int src_fd, const char *src_name,
                      int dest_fd, const char *dst_name,
                      const struct stat *src_sb,
-                     const struct stat *dst_sb, bool new_dst,
+                     const struct stat *dst_sb,
+                     const struct stat *cur_sb, bool new_dst,
                      mode_t dst_mode, mode_t omitted_permissions,
                      mode_t extra_permissions,
                      const struct chopin_options *x)
@@ -303,8 +306,14 @@ chopin_apply_meta_fd(int src_fd, const char *src_name,
     }
 
     /* 2. Ownership before xattr (chown clears capabilities) and
-       before chmod (chown clears set-id bits for non-root). */
-    if (x->preserve_ownership) {
+       before chmod (chown clears set-id bits for non-root). GNU
+       skips the chown entirely when the dest already carries the
+       right owner and group (copy.c:1071) - the common same-user
+       -a case pays zero chown syscalls. */
+    if (x->preserve_ownership
+        && !(cur_sb != NULL
+             && cur_sb->st_uid == src_sb->st_uid
+             && cur_sb->st_gid == src_sb->st_gid)) {
         int r = set_owner_fd(dest_fd, dst_name, src_sb, dst_sb, new_dst,
                              dst_mode, x);
         if (r < 0)
