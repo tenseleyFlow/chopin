@@ -696,8 +696,29 @@ meta "-t" meta-times "preserve=timestamps only" ORDERED C 0 \
     -- --preserve=timestamps s d/p3
 meta "" meta-mode "preserve=mode only" ORDERED C 0 \
     -- --preserve=mode s d/p4
-meta "-x" meta-xattr "preserve=xattr" ORDERED C 0 \
-    -- --preserve=xattr s d/p5
+# Build-parity carve-out (10C mac loop, DEV-006 family): coreutils
+# on macOS cannot be built with xattr support (USE_XATTR needs
+# libattr), so --preserve=xattr FATALS in the oracle while chopin's
+# Darwin xattr backend succeeds - a capability GNU lacks there, kept
+# deliberately. Probe the oracle once and skip the case where it
+# cannot participate.
+if [ -z "${ORACLE_XATTR_OK:-}" ]; then
+    xp=$(mktemp "$work/xp.XXXXXX") && printf x > "$xp"
+    if "$oracle" --preserve=xattr "$xp" "$xp.c" 2>&1 \
+        | grep -q 'built without xattr support'; then
+        ORACLE_XATTR_OK=0
+    else
+        ORACLE_XATTR_OK=1
+    fi
+    rm -f "$xp" "$xp.c"
+fi
+if [ "$ORACLE_XATTR_OK" = 1 ]; then
+    meta "-x" meta-xattr "preserve=xattr" ORDERED C 0 \
+        -- --preserve=xattr s d/p5
+else
+    cases=$((cases + 1))
+    skipped=$((skipped + 1))
+fi
 meta "" meta-nomode "no-preserve=mode fresh" ORDERED C 0 \
     -- --no-preserve=mode s d/p6
 meta "" meta-umask "bare cp umask mode" ORDERED C 0 -- s d/p7

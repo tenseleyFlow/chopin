@@ -51,6 +51,22 @@ last_component_of(const char *name)
    (POSIX 2008 default). */
 #define CHOPIN_CAN_HARDLINK_SYMLINKS 1
 
+#if CHOPIN_HAVE_FCLONEFILEAT
+#include <sys/attr.h>
+#include <sys/clonefile.h>
+/* Added in macOS 12.6 / 10.13; older SDKs lack them. */
+#ifdef CLONE_ACL
+#define CHOPIN_CLONE_ACL CLONE_ACL
+#else
+#define CHOPIN_CLONE_ACL 0
+#endif
+#ifdef CLONE_NOOWNERCOPY
+#define CHOPIN_CLONE_NOOWNERCOPY CLONE_NOOWNERCOPY
+#else
+#define CHOPIN_CLONE_NOOWNERCOPY 0
+#endif
+#endif
+
 /* Recursion state (copy.c dir_list): the chain of source dirs above
    this point, for cycle detection. */
 struct dir_list {
@@ -530,6 +546,89 @@ copy_reg(const char *src_name, const char *dst_name,
     mode_t open_mode = (dst_mode & ~omitted_permissions)
         | (x->preserve_xattr && chopin_euid() != 0 ? S_IWUSR : 0);
     mode_t extra_permissions = open_mode & ~dst_mode;
+
+#if CHOPIN_HAVE_FCLONEFILEAT && !CHOPIN_HAVE_GETXATTR
+    /* The APFS engine (GNU copy.c:847-940, sprint 07B completed in
+       10C once nomad carried the pinned oracle): clone by NAME into
+       the dest directory BEFORE any create. Only when the cloned
+       mode bits cannot exceed the desired ones (the security race
+       GNU guards); CLONE_NOFOLLOW covers dangling-dest-symlink
+       writes. A clean clone skips the whole metadata tail exactly
+       as GNU does; a partial-mode clone gets the name-based chmod. */
+    if (*new_dst && x->data_copy_required
+        && x->reflink_mode != CHOPIN_REFLINK_NEVER) {
+        mode_t cloned_mode = src_sb->st_mode
+            & (S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO);
+        mode_t desired_mode = x->preserve_mode
+            ? src_sb->st_mode & 07777
+            : ((x->explicit_no_preserve_mode
+                    ? (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP
+                       | S_IROTH | S_IWOTH)
+                    : dst_mode)
+               & ~chopin_cached_umask());
+
+        if (!(cloned_mode & ~desired_mode)) {
+            uint32_t fc_flags = (uint32_t)CLONE_NOFOLLOW
+                | (x->preserve_mode ? (uint32_t)CHOPIN_CLONE_ACL : 0u)
+                | (x->preserve_ownership
+                       ? 0u : (uint32_t)CHOPIN_CLONE_NOOWNERCOPY);
+            int s = fclonefileat(source_desc, dst_dirfd, dst_relname,
+                                 fc_flags);
+
+            if (s != 0 && (fc_flags & CHOPIN_CLONE_ACL)
+                && errno == EINVAL) {
+                fc_flags &= ~(uint32_t)CHOPIN_CLONE_ACL;
+                s = fclonefileat(source_desc, dst_dirfd, dst_relname,
+                                 fc_flags);
+            }
+            if (s == 0) {
+                debug.reflink = "yes";
+                if (!x->preserve_timestamps) {
+                    struct timespec now[2];
+
+                    now[0].tv_nsec = UTIME_NOW;
+                    now[1].tv_nsec = UTIME_NOW;
+                    now[0].tv_sec = now[1].tv_sec = 0;
+                    if (utimensat(dst_dirfd, dst_relname, now,
+                                  AT_SYMLINK_NOFOLLOW) != 0) {
+                        chopin_error(errno, "updating times for %s",
+                                     chopin_quoteaf(dst_name));
+                        return_val = false;
+                        goto clone_done;
+                    }
+                }
+                if ((desired_mode & ~cloned_mode) != 0
+                    && fchmodat(dst_dirfd, dst_relname, desired_mode,
+                                0) != 0) {
+                    chopin_error(errno, "setting permissions for %s",
+                                 chopin_quoteaf(dst_name));
+                    return_val = false;
+                }
+clone_done:
+                emit_debug(x, &debug);
+                if (close(source_desc) < 0) {
+                    chopin_error(errno, "failed to close %s",
+                                 chopin_quoteaf(src_name));
+                    return_val = false;
+                }
+                return return_val;
+            }
+            /* Clone failed without creating the dest: fatal only
+               under --reflink=always, else fall through to the
+               normal create (GNU handle_clone_fail shape). */
+            if (x->reflink_mode == CHOPIN_REFLINK_ALWAYS) {
+                chopin_error(errno, "failed to clone %s from %s",
+                             chopin_quoteaf_n(0, dst_name),
+                             chopin_quoteaf_n(1, src_name));
+                return_val = false;
+                goto close_src_desc;
+            }
+            debug.reflink = "unsupported";
+        } else {
+            debug.reflink = "avoided";
+        }
+    }
+#endif
 
     if (*new_dst) {
         dest_desc = openat(dst_dirfd, dst_relname,

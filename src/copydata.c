@@ -530,10 +530,20 @@ chopin_copy_file_data(int src_fd, const struct stat *src_sb,
        exactly as GNU does (fuzz trial 42-41). */
     debug->sparse = "no";
 
-    /* Scantype is inferred (and reported) regardless of sparse mode:
-       GNU says "sparse detection: SEEK_HOLE" even under
-       --sparse=never. */
-    enum scantype scantype = infer_scantype(src_fd, src_sb, &data_start);
+    /* Scantype is inferred (and reported) regardless of sparse mode
+       ON LINUX: GNU consults it under --sparse=never because the
+       copy_file_range extent path needs it, and says "sparse
+       detection: SEEK_HOLE" (sprint 07 measurement). WITHOUT
+       copy_file_range (Darwin), GNU never infers under never and the
+       word stays "no" - measured against the nomad pinned oracle
+       (10C mac parity loop). */
+    enum scantype scantype;
+#if !CHOPIN_HAVE_COPY_FILE_RANGE
+    if (x->sparse_mode == CHOPIN_SPARSE_NEVER)
+        scantype = PLAIN_SCANTYPE;
+    else
+#endif
+        scantype = infer_scantype(src_fd, src_sb, &data_start);
 
     if (scantype == ERROR_SCANTYPE) {
         chopin_error(errno, "cannot lseek %s", chopin_quoteaf(src_name));

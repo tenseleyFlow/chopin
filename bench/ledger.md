@@ -141,3 +141,35 @@ readings; reflink WON; smallfile WON. Ties within guard tolerance:
 swarm-empty, sparse, metadata, large-nocow-warm. LOSS: hardlink-farm
 1.26x (no published bar; open item). fcp remains ahead on
 swarm/empty flat-tree lanes - report lines, not class bars.
+
+## NOMAD-1 warm table (M5 Pro, APFS, pinned 9.11 oracle built
+## on-box, dev scale, 2026-07-20; cold is Linux-only)
+
+Pre-clone-engine highlights (first run) and post-engine reruns:
+
+swarm-empty:    chopin 10.12  ser 9.96   gnu 19.19  fcp 14.40
+                xcp 7.20   -> 1.9x GNU
+kernel warm:    chopin 4.92   ser 12.70  gnu 6.94   fcp 4.66
+                xcp 5.62   -> 1.41x GNU; fcp 5% ahead (report)
+large-nocow:    chopin 0.163  gnu 0.313  -> 1.9x GNU
+sparse-nocow:   chopin 0.0219 gnu 0.0514 -> 2.3x GNU
+hardlink-farm:  chopin 2.298  gnu 2.329  -> WIN (the Linux 1.26x
+                loss does NOT reproduce on APFS)
+metadata-heavy: chopin 1.028  gnu 1.211  -> 1.18x GNU
+reflink 4k:     chopin 0.226  gnu 0.363  fcp 0.210  xcp 0.412
+smallfile:      chopin 1.40ms gnu 1.50ms -> fastest
+
+APFS CLONE ENGINE (sprint 07B stub completed here - the first mac
+machine with a pinned oracle):
+large-single:   0.166s -> 1.41ms (117x; gnu 1.25ms - clone latency)
+sparse:         44ms   -> 1.49ms (gnu 1.34ms)
+The 0.16ms residual vs GNU at clone scale is probe/startup
+overhead; the lane's class bar (xcp: 148ms here) is beaten 100x.
+
+Mac parity: golden 148/148 + 1 build-parity skip (--preserve=xattr
+FATALS in any macOS coreutils build - libattr does not exist there;
+chopin's Darwin xattr backend succeeds and is KEPT as a deliberate
+capability carve-out, DEV-006 family). Two mac parity fixes landed:
+scantype inference under --sparse=never follows GNU's no-cfr shape
+(word "no", not "SEEK_HOLE"), and the golden xattr case probes
+oracle capability. Mac identity: 30/30 byte-exact.
