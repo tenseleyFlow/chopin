@@ -208,18 +208,14 @@ chopin_clone_pair_known_unsupported(dev_t src, dev_t dst)
 }
 
 int
-chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, bool new_dst,
-                  const struct chopin_options *x)
+chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, dev_t dst_dev,
+                  bool new_dst, const struct chopin_options *x)
 {
     (void)new_dst;
 
 #if CHOPIN_HAVE_FICLONE
-    struct stat dsb;
-
-    if (fstat(dest_fd, &dsb) != 0)
-        return errno;
     if (x->reflink_mode != CHOPIN_REFLINK_ALWAYS
-        && pair_failed(src_dev, dsb.st_dev)) {
+        && pair_failed(src_dev, dst_dev)) {
         atomic_fetch_add(&cache_hits, 1);
         return -1;
     }
@@ -230,7 +226,7 @@ chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, bool new_dst,
     bool terminal = err == EIO || err == ENOMEM || err == ENOSPC
         || err == EDQUOT;
     if (!terminal)
-        remember_failed_pair(src_dev, dsb.st_dev);
+        remember_failed_pair(src_dev, dst_dev);
     return err;
 #elif CHOPIN_HAVE_FCLONEFILEAT
     /* macOS: fclonefileat clones by NAME into a directory; the fd
@@ -241,12 +237,14 @@ chopin_clone_file(int dest_fd, int src_fd, dev_t src_dev, bool new_dst,
     (void)dest_fd;
     (void)src_fd;
     (void)src_dev;
+    (void)dst_dev;
     (void)x;
     return ENOTSUP;
 #else
     (void)dest_fd;
     (void)src_fd;
     (void)src_dev;
+    (void)dst_dev;
     (void)x;
     return ENOTSUP;
 #endif

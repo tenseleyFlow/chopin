@@ -85,6 +85,7 @@ chopin_copy_init(void)
     chopin_copydata_init();
     chopin_copy_chunks_init();
     (void)chopin_cached_umask();
+    (void)chopin_euid();
 }
 
 static bool copy_internal(const char *src_name, const char *dst_name,
@@ -527,7 +528,7 @@ copy_reg(const char *src_name, const char *dst_name,
     }
 
     mode_t open_mode = (dst_mode & ~omitted_permissions)
-        | (x->preserve_xattr && geteuid() != 0 ? S_IWUSR : 0);
+        | (x->preserve_xattr && chopin_euid() != 0 ? S_IWUSR : 0);
     mode_t extra_permissions = open_mode & ~dst_mode;
 
     if (*new_dst) {
@@ -567,6 +568,22 @@ copy_reg(const char *src_name, const char *dst_name,
         goto close_src_desc;
     }
 
+    /* Dest fstat BEFORE the engine rungs (sprint 10B): the clone
+       rung needs only st_dev, which this fstat already yields -
+       re-fstating inside clone_file was a third stat per file on
+       the cold-swarm profile. fstat is side-effect-free and clone
+       never changes the fields the metadata tail consumes (mode/
+       owner baseline), so the reorder is behavior-neutral. */
+    if (fstat(dest_desc, &sb) != 0) {
+        chopin_error(errno, "cannot fstat %s", chopin_quoteaf(dst_name));
+        return_val = false;
+        goto close_src_and_dst_desc;
+    }
+    if (!*new_dst) {
+        dest_sb_pre = sb;
+        have_dest_sb_pre = true;
+    }
+
     /* Engine ladder rung 1: FICLONE (copy.c:1006-1011). Attempted for
        every regular copy under reflink!=never - except through
        chopin's per-(src_dev,dst_dev) failed-probe cache (overview
@@ -580,7 +597,7 @@ copy_reg(const char *src_name, const char *dst_name,
         && x->reflink_mode != CHOPIN_REFLINK_NEVER) {
         int clone_err = chopin_clone_file(dest_desc, source_desc,
                                           src_open_sb.st_dev,
-                                          *new_dst, x);
+                                          sb.st_dev, *new_dst, x);
         if (clone_err == 0) {
             debug.reflink = "yes";
             data_done = true;
@@ -613,16 +630,6 @@ copy_reg(const char *src_name, const char *dst_name,
         debug.reflink = "no";
     }
 
-    if (fstat(dest_desc, &sb) != 0) {
-        chopin_error(errno, "cannot fstat %s", chopin_quoteaf(dst_name));
-        return_val = false;
-        goto close_src_and_dst_desc;
-    }
-    if (!*new_dst) {
-        dest_sb_pre = sb;
-        have_dest_sb_pre = true;
-    }
-
     /* xattr-on-readonly dance (2.4 item 8): widen an existing dest
        temporarily; if the chmod fails, drop extra_permissions. */
     if (extra_permissions && !*new_dst) {
@@ -640,7 +647,8 @@ copy_reg(const char *src_name, const char *dst_name,
     if (!chopin_apply_meta_fd(source_desc, src_name, dest_desc, dst_name,
                               &src_open_sb,
                               have_dest_sb_pre ? &dest_sb_pre : NULL,
-                              *new_dst, dst_mode, omitted_permissions,
+                              &sb, *new_dst, dst_mode,
+                              omitted_permissions,
                               extra_permissions, x))
         return_val = false;
 
@@ -738,14 +746,17 @@ close_src_desc:
    and performs the tail bookkeeping copy_internal would have done
    inline: forget_created on failure, dest_info backfill on success.
 
-   The options pointer stays valid because every copy_dir barriers
-   before its stack frame dies; strings are payload-owned. */
+   The payload owns EVERYTHING it touches - strings and the options
+   struct BY VALUE. The options otherwise live in copy_dir stack
+   frames, and since sprint 10B's deferred barriers those frames can
+   die while the payload is still in flight (the 0-byte-file UAF,
+   identity trials 9001-9/11/12). */
 struct reg_payload {
     char *src_name;
     char *dst_name;
     size_t rel_off;
     int dst_dirfd;
-    const struct chopin_options *x;
+    struct chopin_options opts;
     mode_t dst_mode;
     mode_t omitted;
     bool new_dst;
@@ -760,7 +771,7 @@ reg_payload_run(void *arg)
 {
     struct reg_payload *p = arg;
     bool ok = copy_reg(p->src_name, p->dst_name, p->dst_dirfd,
-                       p->dst_name + p->rel_off, p->x, p->dst_mode,
+                       p->dst_name + p->rel_off, &p->opts, p->dst_mode,
                        p->omitted, &p->new_dst, &p->src_sb);
 
     /* dest_info dev/ino backfill: fstat the result by name NOFOLLOW,
@@ -808,7 +819,7 @@ struct chunk_ctl {
     char *dst_name;
     size_t rel_off;
     int dst_dirfd;
-    const struct chopin_options *x;
+    struct chopin_options opts;  /* by value - frame-lifetime UAF */
     mode_t dst_mode;
     mode_t omitted;
     struct stat src_sb;
@@ -849,7 +860,7 @@ chunk_record_failure(struct chunk_ctl *ctl, off_t off, int err,
 static bool
 chunk_finish(struct chunk_ctl *ctl)
 {
-    const struct chopin_options *x = ctl->x;
+    const struct chopin_options *x = &ctl->opts;
     bool ok = true;
 
     if (ctl->failed) {
@@ -868,7 +879,7 @@ chunk_finish(struct chunk_ctl *ctl)
     } else {
         if (!chopin_apply_meta_fd(ctl->src_fd, ctl->src_name,
                                   ctl->dst_fd, ctl->dst_name,
-                                  &ctl->src_sb, NULL, true,
+                                  &ctl->src_sb, NULL, NULL, true,
                                   ctl->dst_mode, ctl->omitted, 0, x))
             ok = false;
         if (ok && verify_enabled) {
@@ -1042,7 +1053,7 @@ try_chunk_dispatch(const char *src_name, const char *dst_name,
     }
 
     mode_t open_mode = (dst_mode & ~omitted)
-        | (x->preserve_xattr && geteuid() != 0 ? S_IWUSR : 0);
+        | (x->preserve_xattr && chopin_euid() != 0 ? S_IWUSR : 0);
     int dfd = openat(dst_dirfd, dst_relname,
                      O_WRONLY | O_CREAT | O_EXCL, open_mode);
 
@@ -1066,7 +1077,7 @@ try_chunk_dispatch(const char *src_name, const char *dst_name,
     ctl->dst_name = chopin_xstrdup(dst_name);
     ctl->rel_off = (size_t)(dst_relname - dst_name);
     ctl->dst_dirfd = dst_dirfd;
-    ctl->x = x;
+    ctl->opts = *x;
     ctl->dst_mode = dst_mode;
     ctl->omitted = omitted;
     ctl->src_sb = open_sb;
@@ -1111,6 +1122,12 @@ dispatch_eligible(const struct chopin_options *x, const struct stat *src_sb,
     if (x->debug || !x->data_copy_required)
         return false;
     if (dst_backup != NULL)
+        return false;
+    /* Multi-link sources under --preserve=links stay serial: a
+       dispatched primary forces every follower into a full drain
+       (hardlink-farm measured 13% BEHIND GNU with primaries
+       dispatched; link groups flow serially without drains). */
+    if (x->preserve_links && src_sb->st_nlink > 1)
         return false;
     if (have_dst_sb
         && (x->update != CHOPIN_UPDATE_ALL
@@ -1189,6 +1206,15 @@ copy_dir(const char *src_name_in, const char *dst_name_in,
     if (count > 0)
         qsort(names, count, sizeof *names, namecmp);
 
+    /* Launch the advisory cache-warming cascade only for WIDE
+       directories (sprint 10B): a tiny -R copy must not pay a
+       16-thread pool spawn (the smallfile lane measured 2x GNU when
+       it did). Wide dirs cover the swarm/kernel shapes; the cascade
+       recurses from here on its own. Never in walk mode, whose gate
+       times the bare spine. */
+    if (count >= 32 && !walk_only)
+        chopin_parallel_prefetch_tree(src_name_in);
+
     if (x->dereference == CHOPIN_DEREF_COMMAND_LINE_ARGUMENTS)
         non_command_line_options.dereference = CHOPIN_DEREF_NEVER;
 
@@ -1204,8 +1230,12 @@ copy_dir(const char *src_name_in, const char *dst_name_in,
         char *cdst = chopin_xmalloc(dstlen + 1 + nl + 1);
         bool fdc = *first_dir_created_per_command_line_arg;
 
-        snprintf(csrc, srclen + 1 + nl + 1, "%s/%s", src_name_in, names[i]);
-        snprintf(cdst, dstlen + 1 + nl + 1, "%s/%s", dst_name_in, names[i]);
+        memcpy(csrc, src_name_in, srclen);
+        csrc[srclen] = '/';
+        memcpy(csrc + srclen + 1, names[i], nl + 1);
+        memcpy(cdst, dst_name_in, dstlen);
+        cdst[dstlen] = '/';
+        memcpy(cdst + dstlen + 1, names[i], nl + 1);
         ok &= copy_internal(csrc, cdst, dst_dirfd, cdst + reloff,
                             new_dst ? 1 : 0, src_sb, ancestors,
                             &non_command_line_options, false,
@@ -1223,11 +1253,6 @@ copy_dir(const char *src_name_in, const char *dst_name_in,
     }
     free(names);
     *first_dir_created_per_command_line_arg = new_first_dir_created;
-
-    /* Per-directory join point (sprint 09B): every payload below this
-       directory completes and replays before the caller applies the
-       directory's own post-order metadata. */
-    ok &= chopin_parallel_barrier();
     return ok;
 }
 
@@ -1573,6 +1598,7 @@ after_labels:
                          chopin_quoteaf(src_name));
             goto tail_fail;
         }
+
         dir.parent = ancestors;
         dir.st_ino = src_sb.st_ino;
         dir.st_dev = src_sb.st_dev;
@@ -1638,6 +1664,22 @@ after_labels:
                                   dst_relname, created, &src_sb, &dir,
                                   x, first_dir_created, copy_into_self);
         }
+
+        /* Per-directory join point (sprint 09B), made CONDITIONAL in
+           sprint 10B: the barrier exists so the directory's own
+           post-order metadata lands after its contents. When that
+           metadata mutates nothing - plain -R, no preserve flags, no
+           mode to restore or re-widen - the barrier is pure futex
+           churn (36% of the warm kernel-tree profile across 4219
+           dirs) and payloads may keep flowing; the dispatch-side
+           slot cap and the final barrier still bound everything. */
+        bool dir_meta_mutates =
+            x->preserve_timestamps || x->preserve_ownership
+            || x->preserve_mode || x->explicit_no_preserve_mode
+            || x->preserve_xattr || restore_dst_mode
+            || omitted != 0;
+        if (dir_meta_mutates)
+            delayed_ok &= chopin_parallel_barrier();
 
         /* Post-order: the directory's own metadata after its
            contents (3.1); rides the call stack, no side structure -
@@ -1749,7 +1791,7 @@ after_labels:
             p->dst_name = chopin_xstrdup(dst_name);
             p->rel_off = (size_t)(dst_relname - dst_name);
             p->dst_dirfd = dst_dirfd;
-            p->x = x;
+            p->opts = *x;
             p->dst_mode = dst_mode_bits;
             p->omitted = omitted;
             p->new_dst = new_dst;
