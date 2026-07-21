@@ -45,6 +45,12 @@ jobs:
       - run: make
       - run: make check
       - run: make sanitize
+      - name: TSan campaign (pool forced on goldens, fuzz, identity)
+        if: runner.os == 'Linux'
+        run: make tsan
+      - name: identity proof (parallel == serial, 600 trials)
+        if: runner.os == 'Linux'
+        run: make identity
 
   alpine:
     runs-on: ubuntu-latest
