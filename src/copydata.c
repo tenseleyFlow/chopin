@@ -120,7 +120,8 @@ chopin_copydata_thread_cleanup(void)
    never on the read/write data path). */
 static _Atomic unsigned long clone_probes;
 static _Atomic unsigned long cache_hits;
-static int stats_enabled;   /* primed by chopin_copydata_init */
+static int stats_enabled;           /* primed by chopin_copydata_init */
+static bool force_scalar_enabled;   /* primed by chopin_copydata_init */
 
 #if CHOPIN_HAVE_FICLONE
 struct dev_pair {
@@ -186,6 +187,8 @@ chopin_copydata_init(void)
     stats_enabled = e != NULL && *e != '\0' && *e != '0';
     if (stats_enabled)
         atexit(stats_atexit);
+    e = getenv("CHOPIN_FORCE_SCALAR");
+    force_scalar_enabled = e != NULL && *e != '\0' && *e != '0';
 }
 
 /* Chunk eligibility asks: would a clone attempt certainly fail?
@@ -383,15 +386,7 @@ sparse_copy(int src_fd, int dest_fd, size_t bsize,
     (void)debug;            /* only the offload block moves debug words */
 #else
     if (!hole_detection && allow_offload) {
-        static bool force_scalar_checked;
-        static bool force_scalar;
-
-        if (!force_scalar_checked) {
-            const char *e = getenv("CHOPIN_FORCE_SCALAR");
-            force_scalar = e != NULL && *e != '\0' && *e != '0';
-            force_scalar_checked = true;
-        }
-        while (!force_scalar && max_n_read > 0) {
+        while (!force_scalar_enabled && max_n_read > 0) {
             size_t chunk = max_n_read > ((ssize_t)SSIZE_MAX >> 30 << 30)
                 ? (size_t)((ssize_t)SSIZE_MAX >> 30 << 30)
                 : (size_t)max_n_read;
