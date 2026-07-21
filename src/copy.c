@@ -66,6 +66,12 @@ static const char *top_level_dst_name;
 /* Primed by chopin_copy_init before any pool worker exists: lazy
    first-use initialization would be a data race under the pool. */
 static int verify_enabled;
+/* CHOPIN_DEBUG_WALK=1 (sprint 10): traverse sources and run the full
+   decision ladder but mutate NOTHING - the spine-traversal gate
+   times walk+plan alone. Meaningful for fresh-dst recursive copies
+   (the gate's shape); creation, data, and metadata sites are
+   skipped. */
+static int walk_only;
 static void chopin_copy_chunks_init(void);
 
 void
@@ -74,6 +80,8 @@ chopin_copy_init(void)
     const char *e = getenv("CHOPIN_DEBUG_VERIFY");
 
     verify_enabled = e != NULL && *e != '\0' && *e != '0';
+    e = getenv("CHOPIN_DEBUG_WALK");
+    walk_only = e != NULL && *e != '\0' && *e != '0';
     chopin_copydata_init();
     chopin_copy_chunks_init();
     (void)chopin_cached_umask();
@@ -1569,6 +1577,19 @@ after_labels:
         dir.st_ino = src_sb.st_ino;
         dir.st_dev = src_sb.st_dev;
 
+        if (walk_only) {
+            struct dir_list *anc = &dir;
+            bool wdc = *first_dir_created;
+            bool wok = true;
+
+            if (!(x->one_file_system && parent_sb != NULL
+                  && parent_sb->st_dev != src_sb.st_dev))
+                wok = copy_dir(src_name, dst_name, dst_dirfd,
+                               dst_relname, true, &src_sb, anc, x,
+                               &wdc, copy_into_self);
+            ok = wok;
+            goto tail;
+        }
         if (new_dst || !S_ISDIR(dst_sb.st_mode)) {
             mode_t mode = dst_mode_bits & ~omitted;
 
@@ -1705,6 +1726,10 @@ after_labels:
         mode_t omitted = x->preserve_ownership
             ? (dst_mode_bits & (S_IRWXG | S_IRWXO)) : 0;
 
+        if (walk_only) {
+            ok = true;
+            goto tail;
+        }
         if (dispatch_eligible(x, &src_sb, have_dst_sb, dst_backup)
             && (chopin_parallel_note_eligible(src_sb.st_size),
                 chopin_parallel_active())
