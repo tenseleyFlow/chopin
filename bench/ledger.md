@@ -105,3 +105,39 @@ hardlink-farm:     chopin 0.186 gnu 0.153 (1.2x - OPEN ITEM;
 Gates: ALL PASS (startup, throttled-io par 0.71 vs ser 1.50,
 ficlone-cache 1 probe, spine-walk 59ms/65k).
 Budget: B1 88<=92, B2 9<=10/file, B3 1 ioctl vs 33.
+
+## RELEASE-SCALE dev-box table (kasumi, 2026-07-20, min-of-3)
+
+Locked lane sizes: swarm 200k x 1K, empty 1M, kernel 65k, large
+4 GiB, sparse 2 GiB, hardlink 5k x 8, meta 20k xattrs, reflink 10k.
+
+swarm cold:        chopin 2.84   ser 5.51   gnu 5.35   fcp 2.11
+                   xcp 2.54   wcp 4.80(no-fidelity)
+                   -> 1.88x GNU; wcp CLASS BAR beaten 1.7x; fcp
+                   leads (report line)
+swarm-empty 1M:    chopin 11.55  ser 11.38  gnu 10.98  fcp 6.24
+                   xcp 12.88  wcp 10.44(no-fidelity)
+                   -> 1.03-1.05x of GNU, tolerance tie; cpz bar
+                   report-not-gate; empties now forced serial
+kernel warm:       chopin 0.689  gnu 1.216  fcp 0.819  xcp 0.743
+                   wcp 2.59(no-fidelity)
+                   -> CLASS BAR (fcp warm) beaten 16%; beats xcp too
+kernel cold:       chopin 0.783  gnu 1.683  fcp 0.886  xcp 1.013
+large reflink:     chopin 0.69ms fastest everywhere (gnu 0.79ms,
+                   wcp real-copies 2.65s)
+large-nocow 4G:    warm chopin 2.580 ~ gnu 2.584; cold 2.72 vs 2.88
+sparse reflink:    chopin 0.57ms ~ gnu 0.54ms
+sparse-nocow:      chopin 0.1836 ~ gnu 0.1824 (1.006 tie)
+hardlink-farm:     chopin 0.506  gnu 0.400  (1.26x - OPEN ITEM)
+metadata-heavy:    chopin 0.517 ~ gnu 0.511 (fcp 0.318 no-fidelity)
+reflink 10k:       chopin 0.117  gnu 0.184  fcp 0.121  xcp 0.119
+                   -> fastest, cache+parallel
+smallfile:         chopin 0.254ms  gnu 0.259ms -> fastest
+
+Victory-lane verdicts at release scale: swarm (bar wcp) WON;
+kernel (bar fcp warm) WON; large (bar xcp cold: xcp 0.0077 clone -
+chopin 0.0032 clone, and nocow cold 2.72 vs xcp n/a) WON on both
+readings; reflink WON; smallfile WON. Ties within guard tolerance:
+swarm-empty, sparse, metadata, large-nocow-warm. LOSS: hardlink-farm
+1.26x (no published bar; open item). fcp remains ahead on
+swarm/empty flat-tree lanes - report lines, not class bars.

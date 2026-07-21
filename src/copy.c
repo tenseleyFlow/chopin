@@ -1129,6 +1129,12 @@ dispatch_eligible(const struct chopin_options *x, const struct stat *src_sb,
        dispatched; link groups flow serially without drains). */
     if (x->preserve_links && src_sb->st_nlink > 1)
         return false;
+    /* Empty files stay serial: the payload would be open/close/meta
+       with zero data, and the pool roundtrip costs more than it
+       carries (release-scale swarm-empty: parallel 11.55s vs serial
+       11.38s over 1M empties). */
+    if (src_sb->st_size == 0)
+        return false;
     if (have_dst_sb
         && (x->update != CHOPIN_UPDATE_ALL
             || x->interactive == CHOPIN_I_ASK_USER

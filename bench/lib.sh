@@ -55,6 +55,11 @@ bench_lane() {
     bl_prep="rm -rf '$bl_dst'"
     bl_warm=""
     if [ "$bl_temp" = cold ]; then
+        # drop_caches is Linux-only; other systems record warm-only
+        # (family precedent: per-machine artifacts say what they are).
+        [ "$(uname -s)" = Linux ] || {
+            echo "  $bl_lane/$bl_tool: SKIP (cold is Linux-only)"
+            return 0; }
         have_sudo || {
             echo "  $bl_lane/$bl_tool: SKIP (cold needs sudo)"; return 0; }
         bl_prep="$bl_prep; $(cold_prepare)"
