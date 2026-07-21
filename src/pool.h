@@ -32,6 +32,12 @@ int chopin_pool_workers(void);
    owned by the caller until chopin_pool_drain returns. */
 void chopin_pool_submit(chopin_pool_fn fn, void *const *args, size_t n);
 
+/* Enqueue at the FRONT of the queue - for advisory work (cache
+   prefetch) that is only useful if it runs before the copy payloads
+   already queued behind the spine's current position. */
+void chopin_pool_submit_front(chopin_pool_fn fn, void *const *args,
+                              size_t n);
+
 /* Block until every submitted payload has executed. Ephemeral shape
    also joins the workers. */
 void chopin_pool_drain(void);

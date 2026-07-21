@@ -38,6 +38,12 @@ void chopin_parallel_dispatch(bool (*run)(void *),
 /* True if the path names a dest whose payload has not yet joined. */
 bool chopin_parallel_pending_path(const char *path);
 
+/* Advisory cold-metadata subtree prefetch (sprint 10B): a worker
+   cascade stats every entry under dir to warm the dentry/inode
+   cache ahead of the spine's serial ladder stats. Fire-and-forget;
+   call once per command-line directory operand. */
+void chopin_parallel_prefetch_tree(const char *dir);
+
 /* Drain every in-flight payload, replay all slot stderr in traversal
    order, run join hooks, clear the batch. Returns the AND of payload
    results (true when nothing was pending). */

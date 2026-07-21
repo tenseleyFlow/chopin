@@ -143,12 +143,10 @@ start_workers(void)
     }
 }
 
-void
-chopin_pool_submit(chopin_pool_fn fn, void *const *args, size_t n)
+/* Caller holds pool_lock. */
+static void
+queue_reserve(size_t n)
 {
-    if (n == 0)
-        return;
-    pthread_mutex_lock(&pool_lock);
     if (q_len + n + 1 > q_cap) {
         size_t want = q_cap ? q_cap : 64;
 
@@ -164,16 +162,54 @@ chopin_pool_submit(chopin_pool_fn fn, void *const *args, size_t n)
         q_head = 0;
         q_cap = want;
     }
-    for (size_t i = 0; i < n; i++) {
-        queue[(q_head + q_len) % q_cap].fn = fn;
-        queue[(q_head + q_len) % q_cap].arg = args[i];
-        q_len++;
+}
+
+static void
+submit_common(chopin_pool_fn fn, void *const *args, size_t n, bool front)
+{
+    if (n == 0)
+        return;
+    pthread_mutex_lock(&pool_lock);
+    queue_reserve(n);
+    if (front) {
+        for (size_t i = n; i-- > 0; ) {
+            q_head = (q_head + q_cap - 1) % q_cap;
+            queue[q_head].fn = fn;
+            queue[q_head].arg = args[i];
+            q_len++;
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            queue[(q_head + q_len) % q_cap].fn = fn;
+            queue[(q_head + q_len) % q_cap].arg = args[i];
+            q_len++;
+        }
     }
     shutting_down = false;
     start_workers();
-    /* One broadcast per batch - the batched-handoff contract. */
-    pthread_cond_broadcast(&work_avail);
+    /* One handoff per batch - the batched contract. Small batches
+       signal exactly n times instead of waking every parked worker
+       (the broadcast storm was 36% of the warm kernel-tree
+       profile). */
+    if (n >= (size_t)n_workers) {
+        pthread_cond_broadcast(&work_avail);
+    } else {
+        for (size_t i = 0; i < n; i++)
+            pthread_cond_signal(&work_avail);
+    }
     pthread_mutex_unlock(&pool_lock);
+}
+
+void
+chopin_pool_submit(chopin_pool_fn fn, void *const *args, size_t n)
+{
+    submit_common(fn, args, n, false);
+}
+
+void
+chopin_pool_submit_front(chopin_pool_fn fn, void *const *args, size_t n)
+{
+    submit_common(fn, args, n, true);
 }
 
 static void

@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +36,11 @@ static long file_floor = 4;
 static long long byte_floor = 8 << 20;
 static long seen_files;
 static long long seen_bytes;
+/* Fed by the prefetch cascade (worker threads): what the tree
+   actually holds, discovered well ahead of the spine - so a big
+   tree activates the pool at its head instead of 8 MiB in. */
+static _Atomic long scout_files;
+static _Atomic long long scout_bytes;
 
 static void
 parse_floors(void)
@@ -66,9 +72,12 @@ chopin_parallel_active(void)
 {
     if (!floors_parsed)
         parse_floors();
-    return chopin_pool_workers() > 0
-        && seen_files >= file_floor
-        && seen_bytes >= byte_floor;
+    if (chopin_pool_workers() <= 0)
+        return false;
+    if (seen_files >= file_floor && seen_bytes >= byte_floor)
+        return true;
+    return atomic_load(&scout_files) >= file_floor
+        && atomic_load(&scout_bytes) >= byte_floor;
 }
 
 /* ---- Device-pair classing (overview s7) ---------------------------
@@ -371,10 +380,110 @@ payload_trampoline(void *arg)
     chopin_error_capture(NULL);
 }
 
+/* ---- Cold-metadata subtree prefetch (sprint 10B) ------------------
+   The cold-swarm profile showed the spine's serial newfstatat paying
+   the full cold metadata latency per file (cold spine walk alone:
+   1.23s over 50k; warm: 0.12s). This is fcp's parallel traversal
+   recast as ADVISORY cache warming: a worker task opens one
+   directory, stats every entry to warm dentries/inodes, and
+   self-submits a task per child directory - the cascade walks the
+   whole subtree ahead of the spine while touching nothing the spine
+   reasons about. No result is kept, no ordering exists, and if the
+   spine outruns the cascade it pays cold exactly as before.
+   Front-of-queue so queued copy payloads cannot starve it. */
+struct prefetch_task {
+    char *path;
+    int depth;
+};
+
+static void
+prefetch_run(void *arg)
+{
+    struct prefetch_task *t = arg;
+    struct stat sb;
+
+    if (fstatat(AT_FDCWD, t->path, &sb, AT_SYMLINK_NOFOLLOW) == 0
+        && S_ISDIR(sb.st_mode) && t->depth < 32) {
+        DIR *d = opendir(t->path);
+
+        if (d != NULL) {
+            size_t plen = strlen(t->path);
+            struct dirent *de;
+            void *kids[64];
+            size_t nkids = 0;
+
+            while ((de = readdir(d)) != NULL) {
+                if (de->d_name[0] == '.'
+                    && (de->d_name[1] == '\0'
+                        || (de->d_name[1] == '.'
+                            && de->d_name[2] == '\0')))
+                    continue;
+
+                size_t nl = strlen(de->d_name);
+                char *p = chopin_xmalloc(plen + 1 + nl + 1);
+                struct stat csb;
+
+                memcpy(p, t->path, plen);
+                p[plen] = '/';
+                memcpy(p + plen + 1, de->d_name, nl + 1);
+                if (fstatat(AT_FDCWD, p, &csb,
+                            AT_SYMLINK_NOFOLLOW) != 0) {
+                    free(p);
+                    continue;
+                }
+                if (S_ISREG(csb.st_mode)) {
+                    atomic_fetch_add(&scout_files, 1);
+                    atomic_fetch_add(&scout_bytes, csb.st_size);
+                }
+                if (S_ISDIR(csb.st_mode)) {
+                    struct prefetch_task *ct =
+                        chopin_xmalloc(sizeof *ct);
+
+                    ct->path = p;
+                    ct->depth = t->depth + 1;
+                    kids[nkids++] = ct;
+                    if (nkids == 64) {
+                        chopin_pool_submit_front(prefetch_run, kids,
+                                                 nkids);
+                        nkids = 0;
+                    }
+                } else {
+                    free(p);    /* file: the stat itself was the work */
+                }
+            }
+            closedir(d);
+            if (nkids > 0)
+                chopin_pool_submit_front(prefetch_run, kids, nkids);
+        }
+    }
+    free(t->path);
+    free(t);
+}
+
+void
+chopin_parallel_prefetch_tree(const char *dir)
+{
+    /* Deliberately floor-free: the floors gate DISPATCH cost on tiny
+       copies, but a recursive dir operand is the pool's natural
+       shape and the cascade must run ahead of the very first cold
+       stats - waiting for the byte floor would leave the head of
+       the tree serial-cold. */
+    if (chopin_pool_workers() <= 0)
+        return;
+
+    struct prefetch_task *t = chopin_xmalloc(sizeof *t);
+    void *arg = t;
+
+    t->path = chopin_xstrdup(dir);
+    t->depth = 0;
+    chopin_pool_submit_front(prefetch_run, &arg, 1);
+}
+
 /* Batched handoff: dispatches accumulate locally and reach the pool
-   64 at a time (one lock + one broadcast per flush), or all at once
-   at a barrier. Never per-file signaling. */
-enum { HANDOFF_BATCH = 64 };
+   256 at a time (one lock + one broadcast per flush), or all at once
+   at a barrier. Never per-file signaling; the fat batch keeps the
+   futex churn out of the profile. */
+enum { HANDOFF_BATCH = 256 };
 static void *handoff[HANDOFF_BATCH];
 static size_t n_handoff;
 
@@ -387,11 +496,23 @@ flush_handoff(void)
     }
 }
 
+/* Deferred-barrier memory bound (sprint 10B): with no-op dir
+   metadata the per-directory barriers stop firing, so slots and
+   pending strings accumulate; drain when the batch grows past this
+   cap. Any spine point is a safe drain point. */
+enum { SLOT_SOFT_CAP = 8192 };
+static size_t slots_since_barrier;
+
 void
 chopin_parallel_dispatch(bool (*run)(void *), void (*join)(void *, bool),
                          void *payload, const char *dst_path)
 {
+    if (slots_since_barrier >= SLOT_SOFT_CAP)
+        chopin_parallel_drain_keep();
+
     struct slot *s = slot_append(SLOT_PAYLOAD);
+
+    slots_since_barrier++;
 
     s->run = run;
     s->join = join;
@@ -439,6 +560,7 @@ chopin_parallel_barrier(void)
         s = next;
     }
     slot_head = slot_tail = NULL;
+    slots_since_barrier = 0;
     if (pend_len > 0) {
         memset(pend_tab, 0, pend_cap * sizeof *pend_tab);
         pend_len = 0;
