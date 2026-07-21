@@ -47,38 +47,47 @@ machine_info() {
 # Times "cmd" (which must copy src to dst), min-of-N, appends to the
 # lane TSV, then manifest-verifies the surviving result tree.
 bench_lane() {
-    lane=$1 temp=$2 src=$3 dst=$4 tool=$5
+    # bl_-prefixed: POSIX sh has no locals and the caller's loop
+    # variables (lane, tool...) must survive this call.
+    bl_lane=$1 bl_temp=$2 bl_src=$3 bl_dst=$4 bl_tool=$5
     shift 5
 
-    prep="rm -rf '$dst'"
-    if [ "$temp" = cold ]; then
-        have_sudo || { echo "  $lane/$tool: SKIP (cold needs sudo)"; return 0; }
-        prep="$prep; $(cold_prepare)"
+    bl_prep="rm -rf '$bl_dst'"
+    bl_warm=""
+    if [ "$bl_temp" = cold ]; then
+        have_sudo || {
+            echo "  $bl_lane/$bl_tool: SKIP (cold needs sudo)"; return 0; }
+        bl_prep="$bl_prep; $(cold_prepare)"
+    else
+        # Micro-lanes without warmup report first-run noise as min.
+        bl_warm="--warmup 2"
     fi
 
-    json="$resdir/$lane.$tool.json"
-    if ! env LC_ALL=C hyperfine --runs "$runs" --prepare "$prep" \
-        --export-json "$json" --style basic \
+    bl_json="$resdir/$bl_lane.$bl_tool.json"
+    # shellcheck disable=SC2086
+    if ! env LC_ALL=C hyperfine --runs "$runs" $bl_warm \
+        --prepare "$bl_prep" \
+        --export-json "$bl_json" --style basic \
         "$(printf '%s ' "$@")" >/dev/null 2>&1; then
-        echo "  $lane/$tool: FAILED (command errored)"
-        echo "$lane	$tool	FAIL	$temp" >> "$resdir/summary.tsv"
+        echo "  $bl_lane/$bl_tool: FAILED (command errored)"
+        echo "$bl_lane	$bl_tool	FAIL	$bl_temp" >> "$resdir/summary.tsv"
         return 1
     fi
 
-    best=$(sed -n 's/.*"min": \([0-9.e-]*\).*/\1/p' "$json" | head -1)
-    echo "$lane	$tool	$best	$temp" >> "$resdir/summary.tsv"
-    echo "  $lane/$tool: ${best}s ($temp, min of $runs)"
+    bl_best=$(sed -n 's/.*"min": \([0-9.e-]*\).*/\1/p' "$bl_json" | head -1)
+    echo "$bl_lane	$bl_tool	$bl_best	$bl_temp" >> "$resdir/summary.tsv"
+    echo "  $bl_lane/$bl_tool: ${bl_best}s ($bl_temp, min of $runs)"
 
     # Correctness: the surviving tree must match the source.
-    if [ -x "$manifest" ] && [ -d "$dst" ]; then
-        base=$(basename "$src")
-        cmproot="$dst"
-        [ -d "$dst/$base" ] && cmproot="$dst/$base"
-        if ! "$manifest" "$src" > "$resdir/.m.src" 2>/dev/null \
-            || ! "$manifest" "$cmproot" > "$resdir/.m.dst" 2>/dev/null \
+    if [ -x "$manifest" ] && [ -d "$bl_dst" ]; then
+        bl_base=$(basename "$bl_src")
+        bl_cmproot="$bl_dst"
+        [ -d "$bl_dst/$bl_base" ] && bl_cmproot="$bl_dst/$bl_base"
+        if ! "$manifest" "$bl_src" > "$resdir/.m.src" 2>/dev/null \
+            || ! "$manifest" "$bl_cmproot" > "$resdir/.m.dst" 2>/dev/null \
             || ! cmp -s "$resdir/.m.src" "$resdir/.m.dst"; then
-            echo "  $lane/$tool: RESULT-TREE MISMATCH - lane invalid" >&2
-            echo "$lane	$tool	TREE-MISMATCH	$temp" >> "$resdir/summary.tsv"
+            echo "  $bl_lane/$bl_tool: RESULT-TREE MISMATCH - lane invalid" >&2
+            echo "$bl_lane	$bl_tool	TREE-MISMATCH	$bl_temp" >> "$resdir/summary.tsv"
             return 1
         fi
     fi

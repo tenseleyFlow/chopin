@@ -9,7 +9,7 @@
 set -u
 . "$(dirname -- "$0")/lib.sh"
 
-lanes="${BENCH_LANES:-swarm swarm-empty kernel-tree large-single sparse hardlink-farm metadata-heavy reflink smallfile}"
+lanes="${BENCH_LANES:-swarm swarm-empty kernel-tree large-single large-nocow sparse sparse-nocow hardlink-farm metadata-heavy reflink smallfile}"
 tools="${BENCH_TOOLS:-chopin gnu fcp xcp wcp}"
 
 machine_info
@@ -29,33 +29,53 @@ tool_cmd() {
     esac
 }
 
-archive_lane() {   # -a semantics for the metadata lane
+archive_lane() {   # -a semantics: metadata + hardlink lanes
     case $1 in
     chopin) echo "$CHOPIN -a $2 $3" ;;
     gnu)    echo "$GNU -a $2 $3" ;;
-    *)      return 1 ;;   # rivals lack full -a fidelity; not their lane
+    fcp)    [ -x "$FCP" ] && echo "$FCP $2 $3" ;;   # fidelity recorded
+    *)      return 1 ;;
+    esac
+}
+
+nocow_lane() {   # --reflink=never: the DATA path (CoW fs would clone)
+    case $1 in
+    chopin) echo "$CHOPIN -R --reflink=never $2 $3" ;;
+    chopin-serial) echo "env CHOPIN_PARALLEL_WORKERS=0 $CHOPIN -R --reflink=never $2 $3" ;;
+    chopin-chunked) echo "env CHOPIN_PARALLEL_CHUNKS=1 CHOPIN_CHUNK_THRESHOLD=67108864 $CHOPIN -R --reflink=never $2 $3" ;;
+    gnu)    echo "$GNU -R --reflink=never $2 $3" ;;
+    *)      return 1 ;;   # rivals: no comparable knob; see reflink lanes
     esac
 }
 
 for lane in $lanes; do
     echo "== $lane"
-    fix=$(sh "$bench_root/bench/fixtures.sh" "$lane") || {
+    case $lane in
+    large-nocow)  fixlane=large-single ;;
+    sparse-nocow) fixlane=sparse ;;
+    *)            fixlane=$lane ;;
+    esac
+    fix=$(sh "$bench_root/bench/fixtures.sh" "$fixlane") || {
         echo "  fixture failed; skipping"; continue; }
     src="$fix/src"
     dst="$fix/dst"
 
     case $lane in
-    swarm|kernel-tree)      temp=cold ;;
-    large-single)           temp=both ;;
+    swarm)                  temp=cold ;;
+    kernel-tree)            temp=both ;;   # the class bar is WARM fcp
+    large-single|large-nocow) temp=both ;;
     *)                      temp=warm ;;
     esac
 
     for tool in $tools; do
-        if [ "$lane" = metadata-heavy ]; then
-            cmd=$(archive_lane "$tool" "$src" "$dst") || continue
-        else
-            cmd=$(tool_cmd "$tool" "$src" "$dst")
-        fi
+        case $lane in
+        metadata-heavy|hardlink-farm)
+            cmd=$(archive_lane "$tool" "$src" "$dst") || continue ;;
+        large-nocow|sparse-nocow)
+            cmd=$(nocow_lane "$tool" "$src" "$dst") || continue ;;
+        *)
+            cmd=$(tool_cmd "$tool" "$src" "$dst") ;;
+        esac
         [ -n "$cmd" ] || continue
         if [ "$temp" = both ]; then
             bench_lane "$lane-warm" warm "$src" "$dst" "$tool" $cmd

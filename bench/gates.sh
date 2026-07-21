@@ -30,12 +30,12 @@ gate() {   # gate <name> <pass|fail|skip> <detail>
 # --- G1: startup floor -------------------------------------------------
 fix=$(sh "$bench_root/bench/fixtures.sh" smallfile)
 t_c=$(env LC_ALL=C hyperfine --runs 10 --warmup 3 --style basic \
-    --prepare "rm -f $fix/dst" \
+    --prepare "rm -rf $fix/dst" \
     --export-json "$resdir/g1c.json" \
     "$CHOPIN $fix/src/one $fix/dst" >/dev/null 2>&1 \
     && sed -n 's/.*"min": \([0-9.e-]*\).*/\1/p' "$resdir/g1c.json" | head -1)
 t_g=$(env LC_ALL=C hyperfine --runs 10 --warmup 3 --style basic \
-    --prepare "rm -f $fix/dst" \
+    --prepare "rm -rf $fix/dst" \
     --export-json "$resdir/g1g.json" \
     "$GNU $fix/src/one $fix/dst" >/dev/null 2>&1 \
     && sed -n 's/.*"min": \([0-9.e-]*\).*/\1/p' "$resdir/g1g.json" | head -1)
