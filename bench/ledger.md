@@ -173,3 +173,26 @@ capability carve-out, DEV-006 family). Two mac parity fixes landed:
 scantype inference under --sparse=never follows GNU's no-cfr shape
 (word "no", not "SEEK_HOLE"), and the golden xattr case probes
 oracle capability. Mac identity: 30/30 byte-exact.
+
+## Open-item closure: hardlink-farm (2026-07-20)
+
+Profiling convicted chopin_src_to_dest_lookup: a LINEAR SCAN at
+3.07% of cycles (6x GNU's entire gnulib-hash cost) - O(groups x
+links) on this lane. Replaced with open addressing keyed on
+(dev,ino) (tombstone deletion; src_info/dest_info keep linear scans
+- they hold command-line operands only). Recovered ~6ms/dev,
+~30ms/release.
+
+The residual 1.15x is TRAVERSAL-ORDER LOCALITY, proven by strace -T:
+identical linkat counts and identical argument shapes, but 11.7us vs
+9.7us per call - GNU's inode-order traversal links group siblings
+adjacently while the inode's refs are journal-hot; chopin's
+deterministic name-order returns to each inode thousands of files
+later. Reordering serial processing would break the parallel==serial
+byte-identity contract for a lane with no published bar that does
+not reproduce on APFS (nomad: chopin WINS it). ACCEPTED as a
+measured cost of the determinism pillar (overview s2); recorded
+here, not gated.
+
+Post-fix: dev 0.180 vs gnu 0.158 (1.14x); release 0.474 vs 0.404
+(1.17x); nomad 2.298 vs 2.329 (win).

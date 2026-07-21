@@ -1,5 +1,6 @@
 #include "hashes.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -83,17 +84,75 @@ chopin_dest_record(const char *relname, const struct stat *sb)
     table_add(&dest_info, relname, sb);
 }
 
-/* --- src_to_dest ---------------------------------------------------- */
+/* --- src_to_dest ----------------------------------------------------
+   Open addressing keyed on (dev, ino). This table sees TREE-scale
+   traffic - one lookup per multi-link entry - and the original
+   linear scan was O(groups x links): 3.07% of cycles on the
+   hardlink-farm profile (6x GNU's entire gnulib-hash cost) and the
+   whole 1.2x lane loss. src_info/dest_info keep their linear scans:
+   they hold command-line operands only. Deletions (forget_created:
+   failure paths, un_backup) use tombstones. */
 
-static struct table src_to_dest;
+struct s2d_slot {
+    char *name;     /* NULL = empty; S2D_TOMB = deleted */
+    dev_t dev;
+    ino_t ino;
+};
+
+static char s2d_tomb_marker;
+#define S2D_TOMB (&s2d_tomb_marker)
+
+static struct s2d_slot *s2d_tab;
+static size_t s2d_cap;      /* power of two */
+static size_t s2d_len;      /* live entries */
+
+static size_t
+s2d_hash(dev_t dev, ino_t ino)
+{
+    uint64_t h = (uint64_t)ino ^ ((uint64_t)dev * 0x9E3779B97F4A7C15ull);
+
+    h ^= h >> 30;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 27;
+    return (size_t)h;
+}
+
+static void
+s2d_grow(void)
+{
+    size_t ncap = s2d_cap ? s2d_cap * 2 : 64;
+    struct s2d_slot *nt = chopin_xmalloc(ncap * sizeof *nt);
+
+    memset(nt, 0, ncap * sizeof *nt);
+    for (size_t i = 0; i < s2d_cap; i++) {
+        if (s2d_tab[i].name == NULL || s2d_tab[i].name == S2D_TOMB)
+            continue;
+
+        size_t j = s2d_hash(s2d_tab[i].dev, s2d_tab[i].ino) & (ncap - 1);
+
+        while (nt[j].name != NULL)
+            j = (j + 1) & (ncap - 1);
+        nt[j] = s2d_tab[i];
+    }
+    free(s2d_tab);
+    s2d_tab = nt;
+    s2d_cap = ncap;
+}
 
 const char *
 chopin_src_to_dest_lookup(dev_t dev, ino_t ino)
 {
-    for (size_t i = 0; i < src_to_dest.len; i++)
-        if (src_to_dest.items[i].dev == dev
-            && src_to_dest.items[i].ino == ino)
-            return src_to_dest.items[i].name;
+    if (s2d_len == 0)
+        return NULL;
+
+    size_t i = s2d_hash(dev, ino) & (s2d_cap - 1);
+
+    while (s2d_tab[i].name != NULL) {
+        if (s2d_tab[i].name != S2D_TOMB
+            && s2d_tab[i].dev == dev && s2d_tab[i].ino == ino)
+            return s2d_tab[i].name;
+        i = (i + 1) & (s2d_cap - 1);
+    }
     return NULL;
 }
 
@@ -104,21 +163,36 @@ chopin_remember_copied(const char *dest, dev_t dev, ino_t ino)
 
     if (earlier != NULL)
         return earlier;
-    struct stat key;
-    key.st_dev = dev;
-    key.st_ino = ino;
-    table_add(&src_to_dest, dest, &key);
+    if ((s2d_len + 1) * 2 > s2d_cap)
+        s2d_grow();
+
+    size_t i = s2d_hash(dev, ino) & (s2d_cap - 1);
+
+    while (s2d_tab[i].name != NULL && s2d_tab[i].name != S2D_TOMB)
+        i = (i + 1) & (s2d_cap - 1);
+    s2d_tab[i].name = chopin_xstrdup(dest);
+    s2d_tab[i].dev = dev;
+    s2d_tab[i].ino = ino;
+    s2d_len++;
     return NULL;
 }
 
 void
 chopin_forget_created(dev_t dev, ino_t ino)
 {
-    for (size_t i = 0; i < src_to_dest.len; i++)
-        if (src_to_dest.items[i].dev == dev
-            && src_to_dest.items[i].ino == ino) {
-            free(src_to_dest.items[i].name);
-            src_to_dest.items[i] = src_to_dest.items[--src_to_dest.len];
+    if (s2d_len == 0)
+        return;
+
+    size_t i = s2d_hash(dev, ino) & (s2d_cap - 1);
+
+    while (s2d_tab[i].name != NULL) {
+        if (s2d_tab[i].name != S2D_TOMB
+            && s2d_tab[i].dev == dev && s2d_tab[i].ino == ino) {
+            free(s2d_tab[i].name);
+            s2d_tab[i].name = S2D_TOMB;
+            s2d_len--;
             return;
         }
+        i = (i + 1) & (s2d_cap - 1);
+    }
 }
