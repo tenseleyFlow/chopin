@@ -29,12 +29,15 @@ start)
     fi
     echo "== building (oracle reused if present) =="
     ssh "$HOST" "$SH \"$PATHS; cd ~/$RDIR && ./configure >/dev/null && gmake -j6 2>&1 | grep -E 'error:' | head -3; test -x build/gnu-cp/src/cp || sh scripts/build-gnu-cp.sh >/dev/null 2>&1; ./build/gnu-cp/src/cp --version | head -1\""
-    echo "== launching detached matrix =="
-    ssh "$HOST" "$SH \"$PATHS; cd ~/$RDIR && rm -f bench.done && nohup sh -c 'BENCH_SCALE=\${BENCH_SCALE:-release} BENCH_RUNS=3 GNU=./build/gnu-cp/src/cp BENCH_TOOLS=\\\"chopin chopin-serial gnu fcp xcp\\\" sh bench/run-all.sh > bench.log 2>&1; echo \\\$? > bench.done' >/dev/null 2>&1 &\""
+    echo "== launching detached A/B sweep =="
+    # bench/ab.sh, not run-all.sh: the matrix runs all reps of one tool
+    # then the other, which biases whichever runs second by ~10% on
+    # warm lanes. ab.sh interleaves and times with nanosecond clocks.
+    ssh "$HOST" "$SH \"$PATHS; cd ~/$RDIR && rm -f bench.done ab.log && nohup sh -c 'for L in swarm kernel-tree large-nocow sparse-nocow reflink hardlink-farm metadata-heavy swarm-empty smallfile; do sh bench/ab.sh \\\$L 6 warm 2>&1 | tail -1; done > ab.log 2>&1; echo \\\$? > bench.done' >/dev/null 2>&1 &\""
     echo "launched; poll with: sh bench/run-nomad.sh status"
     ;;
 status)
-    ssh -o ConnectTimeout=20 "$HOST" "$SH \"cd ~/$RDIR 2>/dev/null && { echo rows=\\\$(cat bench/results/*/summary.tsv 2>/dev/null | wc -l); if [ -f bench.done ]; then echo done rc=\\\$(cat bench.done); else echo running; tail -2 bench.log 2>/dev/null; fi; }\"" \
+    ssh -o ConnectTimeout=20 "$HOST" "$SH \"cd ~/$RDIR 2>/dev/null && { if [ -f bench.done ]; then echo \\\"DONE rc=\\\$(cat bench.done)\\\"; else echo RUNNING; fi; cat ab.log 2>/dev/null; }\"" \
         || echo "nomad unreachable (asleep or off-tailnet)"
     ;;
 fetch)
