@@ -196,3 +196,63 @@ here, not gated.
 
 Post-fix: dev 0.180 vs gnu 0.158 (1.14x); release 0.474 vs 0.404
 (1.17x); nomad 2.298 vs 2.329 (win).
+
+## METHODOLOGY CORRECTION (sprint 11A, 2026-08-01)
+
+Every number ABOVE this line was produced by bench/run-all.sh, which
+drives hyperfine. Three flaws were found while assembling the release
+tables; the numbers above should be read as +/-10% and the corrected
+A/B table below supersedes them where they disagree.
+
+1. ORDERING BIAS. hyperfine runs all reps of tool A, then all of B.
+   Whichever runs second reads a source the first just pulled into
+   page cache. Worth ~10% on warm bulk lanes. It manufactured a
+   large-single "regression" (0.86x) that an interleaved run shows as
+   1.06x, and it under-reported chopin against fcp/xcp (matrix said
+   fcp led swarm-warm; balanced says chopin leads 1.08x).
+2. TIMER RESOLUTION. /usr/bin/time -f %e reports 10 ms - 5% of a
+   0.2 s lane. The first A/B pass used it and read metadata-heavy as
+   0.88x; nanosecond timing reads 0.94-0.97x.
+3. RIVAL FLAGS. ab.sh passed cp's flags to rivals; fcp rejects -R,
+   exited in 1 ms, and scored a 500x "win" because a nonzero exit was
+   timed rather than failed. Nonzero exits are now fatal.
+
+bench/ab.sh is the corrected instrument: interleaved ABBA ordering,
+nanosecond clocks, per-tool flag translation, fatal nonzero exits.
+run-all.sh remains useful for broad sweeps and result-tree
+verification, not for close calls.
+
+## v0.1.0 TABLE (kasumi, corrected instrument)
+
+vs pinned GNU 9.11, min of 6 interleaved reps (release scale where
+noted):
+  kernel-tree cold  2.12x     swarm cold        2.09x
+  kernel-tree warm  1.71x     reflink           1.58x
+  swarm warm        1.55x     large-nocow 4G    1.06x
+  sparse-nocow      1.03x     smallfile         1.00x
+  swarm-empty       0.96x warm / 0.99x release  SLOWER
+  metadata-heavy    0.94x warm / 0.97x release  SLOWER
+  hardlink-farm     0.84x warm / 0.81x release  SLOWER
+
+vs locally re-baselined rivals (same fixtures, same instrument):
+  vs fcp:  kernel 1.22x, swarm warm 1.08x, reflink 1.04x,
+           swarm cold 0.91x, swarm-empty 0.70x
+  vs xcp:  swarm-empty 1.14x, kernel 1.07x, reflink 1.06x,
+           swarm warm 1.01x, swarm cold 1.01x
+
+Reading: chopin wins where bytes move or a tree is walked; it is at
+parity or a few percent behind on pure-metadata trees, where the pool
+has no payload to overlap and name-order traversal costs the inode
+locality GNU gets from inode order. hardlink-farm is the one durable
+loss and is a deliberate trade (determinism over locality).
+
+## Nomad status
+
+The Apple-silicon table above predates the correction and predates
+the release-scale rerun (the box dropped off the tailnet mid-run;
+ssh SIGHUP killed the matrix - bench/run-nomad.sh now launches
+detached with nohup so a dropped tunnel cannot kill a run). The
+large-margin mac results (APFS clone 166ms -> 1.4ms; 1.9-2.3x GNU on
+several lanes) are far outside the +/-10% bias band and stand. The
+near-parity mac rows (e.g. hardlink 2.298 vs 2.329) do not, and are
+not quoted in the README.

@@ -1,0 +1,37 @@
+# chopin v0.1.0 - kasumi (x86-64, 16c, btrfs on NVMe)
+# Order-balanced interleaved A/B vs pinned coreutils 9.11.
+# min of N reps, tools alternating order each rep. Reproduce:
+#   sh bench/ab.sh <lane> <reps> [cold]
+# generated 2026-08-01T12:13:07Z
+
+
+swarm              warm  chopin   0.5710  gnu   0.8856  -> 1.55x 
+kernel-tree        warm  chopin   0.7037  gnu   1.2035  -> 1.71x 
+large-nocow        warm  chopin   0.5946  gnu   0.6291  -> 1.06x 
+sparse-nocow       warm  chopin   0.0221  gnu   0.0227  -> 1.03x 
+reflink            warm  chopin   0.0423  gnu   0.0669  -> 1.58x 
+hardlink-farm      warm  chopin   0.1794  gnu   0.1502  -> 0.84x (chopin SLOWER)
+metadata-heavy     warm  chopin   0.2338  gnu   0.2201  -> 0.94x (chopin SLOWER)
+swarm-empty        warm  chopin   2.1431  gnu   2.0538  -> 0.96x (chopin SLOWER)
+smallfile          warm  chopin   0.0010  gnu   0.0010  -> 1.00x 
+
+swarm              cold  chopin   0.6765  gnu   1.4153  -> 2.09x 
+kernel-tree        cold  chopin   0.7879  gnu   1.6705  -> 2.12x 
+
+# swarm cold vs rivals
+swarm              cold  chopin   0.6782  fcp    0.6199  -> 0.91x (chopin SLOWER)
+swarm              cold  chopin   0.6845  xcp    0.6893  -> 1.01x 
+# release-scale confirmation of the losses
+hardlink-farm      warm  chopin   0.4972  gnu    0.4039  -> 0.81x (chopin SLOWER)
+metadata-heavy     warm  chopin   0.4902  gnu    0.4774  -> 0.97x (chopin SLOWER)
+swarm-empty        warm  chopin  11.5016  gnu   11.3807  -> 0.99x (chopin SLOWER)
+
+# rivals, order-balanced, min of 6, nonzero-exit now fatal
+swarm              warm  chopin   0.5699  fcp    0.6139  -> 1.08x 
+swarm              warm  chopin   0.5702  xcp    0.5731  -> 1.01x 
+kernel-tree        warm  chopin   0.7249  fcp    0.8871  -> 1.22x 
+kernel-tree        warm  chopin   0.7549  xcp    0.8115  -> 1.07x 
+swarm-empty        warm  chopin   2.2139  fcp    1.5577  -> 0.70x (chopin SLOWER)
+swarm-empty        warm  chopin   2.2755  xcp    2.5829  -> 1.14x 
+reflink            warm  chopin   0.0439  fcp    0.0455  -> 1.04x 
+reflink            warm  chopin   0.0434  xcp    0.0460  -> 1.06x 
