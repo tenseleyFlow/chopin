@@ -1,0 +1,19 @@
+# chopin v0.1.0 - nomad-1 (Apple M5 Pro, APFS, macOS 25.4)
+# Order-balanced interleaved A/B vs coreutils 9.11 built on-box.
+# min of 6 reps, tools alternating order each rep, dev scale.
+# Cold lanes are Linux-only (drop_caches); warm only here.
+# generated 2026-08-01T19:45:07Z
+
+swarm              warm  chopin   3.1043  gnu    4.7377  -> 1.53x 
+kernel-tree        warm  chopin   5.1022  gnu    7.2376  -> 1.42x 
+large-nocow        warm  chopin   0.1769  gnu    0.1733  -> 0.98x (chopin SLOWER)
+sparse-nocow       warm  chopin   0.0257  gnu    0.0551  -> 2.14x 
+reflink            warm  chopin   0.2145  gnu    0.3629  -> 1.69x 
+hardlink-farm      warm  chopin   2.3353  gnu    2.2870  -> 0.98x (chopin SLOWER)
+metadata-heavy     warm  chopin   1.1858  gnu    1.1474  -> 0.97x (chopin SLOWER)
+swarm-empty        warm  chopin  19.2601  gnu   19.4091  -> 1.01x 
+smallfile          warm  chopin   0.0043  gnu    0.0041  -> 0.95x (chopin SLOWER)
+
+# Empty-file guard A/B (guard vs no-guard, same machine):
+#   Linux  2.161 vs 2.132 -> 0.99x (neutral)
+#   APFS  19.332 vs 19.737 -> 1.02x (neutral)

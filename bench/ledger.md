@@ -256,3 +256,36 @@ large-margin mac results (APFS clone 166ms -> 1.4ms; 1.9-2.3x GNU on
 several lanes) are far outside the +/-10% bias band and stand. The
 near-parity mac rows (e.g. hardlink 2.298 vs 2.329) do not, and are
 not quoted in the README.
+
+## NOMAD RE-MEASUREMENT (corrected instrument, 2026-08-01)
+
+Supersedes the sprint-10 nomad table above, which was collected with
+the sequential instrument AND before the APFS clone engine existed.
+
+  sparse-nocow 2.14x   reflink 1.69x   swarm 1.53x   kernel 1.42x
+  swarm-empty 1.01x    large-nocow 0.98x   hardlink-farm 0.98x
+  metadata-heavy 0.97x  smallfile 0.95x
+
+Two sprint-10 nomad claims are WITHDRAWN:
+
+1. "hardlink-farm: chopin 2.298 vs gnu 2.329 -> WIN; the Linux loss
+   does NOT reproduce on APFS." Corrected: 2.335 vs 2.287 = 0.98x,
+   chopin slightly SLOWER. The loss does reproduce on APFS - it is
+   just far milder (2% vs 19%), which fits the locality explanation:
+   APFS does not punish revisiting an inode late as hard as btrfs.
+2. "swarm-empty 1.9x GNU." Corrected: 1.01x. The old gap was an
+   ARTIFACT OF AN UNIMPLEMENTED FEATURE: GNU clones every dest on
+   APFS via fclonefileat, chopin did not yet, and not-cloning is
+   cheaper than cloning. Implementing the clone engine faithfully
+   (sprint 10C) moved the lane to parity. That is parity working as
+   intended, not a regression.
+
+Investigated and rejected: skip fclonefileat for zero-length sources
+(would restore ~1.9x). GNU reports "reflink: yes" for cloned empty
+files under --debug, which is byte-parity surface; the speed is not
+available without diverging there. Parity wins ties (overview s3).
+
+Also measured: the empty-file serial guard is NEUTRAL, not a win -
+interleaved guard-vs-noguard is 0.99x on Linux and 1.02x on APFS.
+Its original 1.5% justification was instrument noise. Kept on
+principle (no payload, no pool dispatch), comment corrected.

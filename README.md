@@ -152,11 +152,41 @@ table, each of which had produced a wrong number first:
 The methodology and every per-change measurement are in
 `bench/ledger.md`.
 
-Apple silicon (nomad-1, M5 Pro, APFS) results, including the macOS
-clone engine that takes a 4 GiB copy from 166 ms to 1.4 ms, were
-collected before these methodology fixes. The large-margin results
-survive the correction comfortably; the near-parity ones are being
-re-measured and are not quoted here.
+### Apple silicon
+
+Re-measured with the same instrument on an M5 Pro, APFS, against a
+coreutils 9.11 built on that machine. Cold rows are Linux-only, since
+dropping the page cache needs `/proc/sys/vm/drop_caches`.
+
+| lane | vs GNU cp |
+| --- | --- |
+| sparse | **2.14x** |
+| reflink (APFS clone) | **1.69x** |
+| swarm | **1.53x** |
+| kernel-tree | **1.42x** |
+| swarm-empty | 1.01x |
+| large-single, raw copy | 0.98x |
+| hardlink-farm | 0.98x |
+| metadata-heavy | 0.97x |
+| smallfile | 0.95x |
+
+The shape agrees with Linux — wins where bytes move, parity or just
+behind on metadata-only work — with two platform differences worth
+naming. Sparse copying is much stronger on APFS (2.14x versus 1.03x
+on btrfs). And hardlink-farm costs only 2% here against 19% on
+Linux, because APFS does not pay the same journal-locality penalty
+for revisiting an inode late.
+
+One earlier claim is withdrawn. Before the macOS clone engine
+existed, chopin appeared to beat GNU by 1.9x on empty-file trees.
+That gap was not an optimization: GNU clones every destination on
+APFS via `fclonefileat`, chopin did not yet, and skipping the clone
+is cheaper than doing it. Now that the clone path is implemented
+faithfully, the lane sits at parity. Skipping the clone for
+zero-length sources would restore the gap, but GNU reports
+`reflink: yes` for those files under `--debug`, and that output is
+part of the parity surface — so the speed is not available without
+lying about what happened.
 
 ## How it goes faster
 

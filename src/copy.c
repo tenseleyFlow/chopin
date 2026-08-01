@@ -1228,10 +1228,11 @@ dispatch_eligible(const struct chopin_options *x, const struct stat *src_sb,
        dispatched; link groups flow serially without drains). */
     if (x->preserve_links && src_sb->st_nlink > 1)
         return false;
-    /* Empty files stay serial: the payload would be open/close/meta
-       with zero data, and the pool roundtrip costs more than it
-       carries (release-scale swarm-empty: parallel 11.55s vs serial
-       11.38s over 1M empties). */
+    /* Empty files stay serial: dispatching a payload that copies zero
+       bytes buys nothing. Measured NEUTRAL rather than a win once the
+       instrument was fixed - interleaved swarm-empty is 0.99x on
+       Linux and 1.02x on APFS - so this is kept on principle (no
+       payload, no pool) and not on a performance claim. */
     if (src_sb->st_size == 0)
         return false;
     if (have_dst_sb
