@@ -1,0 +1,31 @@
+# Maintainer: mfwolffe
+# AUR package for chopin. Activates once the GitHub release is public.
+# Neither /usr/bin/chopin nor /usr/bin/cpn is claimed by another Arch
+# package, so no conflicts/replaces stanza is needed.
+pkgname=chopin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="GNU cp reimplementation: byte-faithful to coreutils 9.11, parallel copy engine"
+arch=('x86_64' 'aarch64')
+url="https://github.com/tenseleyFlow/chopin"
+license=('GPL-3.0-or-later')
+makedepends=('gcc')
+source=("$url/releases/download/v$pkgver/chopin-$pkgver.tar.gz")
+# Pinned from the PUBLISHED asset, never a local rebuild.
+sha256sums=('SKIP')
+
+build() {
+	cd "$pkgname-$pkgver"
+	./configure
+	make
+}
+
+# No check(): the parity suites build GNU coreutils 9.11 from source as
+# their oracle (network fetch), which clean-chroot builds forbid. The
+# release pipeline runs golden + mined + fuzz + identity + sanitizers
+# before tagging.
+
+package() {
+	cd "$pkgname-$pkgver"
+	make DESTDIR="$pkgdir" PREFIX=/usr install
+}
