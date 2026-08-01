@@ -10,6 +10,8 @@ cpn
 config.h
 config.mk
 chopin-*.tar.gz
+chopin-*.tar.gz.sha256
+published-*.tar.gz
 build/
 tests/.work/
 bench/results/
