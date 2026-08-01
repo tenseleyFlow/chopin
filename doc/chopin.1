@@ -1,12 +1,258 @@
-.TH CHOPIN 1 "2026" "chopin 0.0.1" "User Commands"
+.TH CHOPIN 1 "2026-08" "chopin 0.1.0" "User Commands"
 .SH NAME
-chopin \- copy files and directories (GNU cp reimplementation)
+chopin \- copy files and directories
 .SH SYNOPSIS
 .B chopin
-[\fIOPTION\fR]... \fISOURCE\fR... \fIDEST\fR
+[\fIOPTION\fR]... [\fB\-T\fR] \fISOURCE\fR \fIDEST\fR
+.br
+.B chopin
+[\fIOPTION\fR]... \fISOURCE\fR... \fIDIRECTORY\fR
+.br
+.B chopin
+[\fIOPTION\fR]... \fB\-t\fR \fIDIRECTORY\fR \fISOURCE\fR...
 .SH DESCRIPTION
-Stub page. The full manual, including the DEVIATIONS section generated
-from doc/deviations.md, ships with v0.1.0.
+Copy
+.I SOURCE
+to
+.IR DEST ,
+or multiple
+.I SOURCE
+arguments to
+.IR DIRECTORY .
+.PP
+.B chopin
+is a from-scratch C11 reimplementation of GNU
+.BR cp (1),
+behavior-faithful to coreutils 9.11: the same options, the same
+result trees, the same diagnostics byte-for-byte, and the same exit
+status, except for the registered corrections in
+.B DEVIATIONS
+below.
+.B cpn
+is the same program under a shorter name; the name affects only the
+program prefix in diagnostics.
+.PP
+Option semantics are those of GNU cp 9.11; see
+.BR cp (1).
+The full 9.11 option surface is accepted, including
+.BR \-a ,
+.BR \-\-attributes\-only ,
+.BR \-b ,
+.BR \-\-backup ,
+.BR \-d ,
+.BR \-\-debug ,
+.BR \-f ,
+.BR \-H ,
+.BR \-i ,
+.BR \-l ,
+.BR \-L ,
+.BR \-n ,
+.BR \-P ,
+.BR \-p ,
+.BR \-\-preserve ,
+.BR \-\-no\-preserve ,
+.BR \-\-parents ,
+.BR \-R ,
+.BR \-\-reflink ,
+.BR \-\-remove\-destination ,
+.BR \-\-sparse ,
+.BR \-s ,
+.BR \-\-strip\-trailing\-slashes ,
+.BR \-\-suffix ,
+.BR \-t ,
+.BR \-T ,
+.BR \-u ,
+.BR \-\-update ,
+.BR \-v ,
+.BR \-x ,
+.BR \-Z ,
+and
+.BR \-\-context .
+.SH PERFORMANCE
+chopin copies with a device-aware worker pool and the platform's
+fastest transfer path: reflink cloning
+.RB ( FICLONE
+on Linux,
+.BR fclonefileat (2)
+on macOS),
+.BR copy_file_range (2)
+offload, and
+.B SEEK_HOLE
+sparse detection, with a scalar read/write loop as the always-present
+fallback.
+.PP
+Ordering is unaffected by parallelism: all output is emitted on the
+traversal spine, so a parallel run is byte-identical to a serial one.
+Rotational and network device pairs are detected and copied serially.
+Directories are traversed in sorted name order, which is
+deterministic across runs and filesystems (GNU traverses in inode
+order).
+.PP
+Measured results, the methodology, and the one workload where chopin
+is slower than GNU cp are recorded in the project README and in
+.IR bench/ledger.md .
+.SH ENVIRONMENT
+The usual locale variables apply
+.RB ( LC_ALL ,
+.BR LC_MESSAGES ,
+.BR LC_CTYPE ),
+along with
+.BR POSIXLY_CORRECT ,
+.BR SIMPLE_BACKUP_SUFFIX ,
+.BR VERSION_CONTROL ,
+and
+.B TMPDIR
+as in GNU cp.
+.PP
+The following variables are chopin extensions. They exist for
+debugging, testing, and benchmarking; none of them change
+user-visible output.
+.TP
+.B CHOPIN_PARALLEL_WORKERS
+Worker count for the copy pool.
+.B 0
+disables the pool entirely (fully serial). Unset selects the logical
+core count, capped at 16 and clamped so worker file descriptors stay
+within
+.BR RLIMIT_NOFILE .
+.TP
+.B CHOPIN_PARALLEL_MIN
+Aggregate floor before the pool activates, as a file count and a byte
+count.
+.B 1
+dispatches every eligible payload; the test suites pin this.
+.TP
+.B CHOPIN_PARALLEL_CHUNKS
+Set to
+.B 1
+to split large single files into disjoint-offset chunks across
+workers. Off by default: no measured win on the benchmarked
+filesystems.
+.TP
+.B CHOPIN_CHUNK_THRESHOLD
+Minimum file size in bytes for chunked dispatch (default 64 MiB).
+.TP
+.B CHOPIN_FORCE_SCALAR
+Set to
+.B 1
+to disable
+.BR copy_file_range (2)
+offload and force the scalar read/write loop.
+.TP
+.B CHOPIN_DEBUG_PLAN
+Print the engine and parallelism plan to standard error.
+.TP
+.B CHOPIN_DEBUG_STATS
+Print reflink probe and probe-cache counters at exit.
+.TP
+.B CHOPIN_DEBUG_VERIFY
+Re-read every destination after copying and compare it against the
+source; abort on any mismatch. This is the correctness oracle for the
+fast paths and is enabled throughout the test suites.
+.TP
+.B CHOPIN_DEBUG_WALK
+Traverse sources and run the full decision ladder without creating,
+writing, or modifying anything. Used to measure traversal cost.
+.PP
+GNU cp's own
+.B \-\-debug
+output is reproduced byte-for-byte.
+.SH EXIT STATUS
+.TP
+.B 0
+All requested copies succeeded.
+.TP
+.B 1
+An error occurred. As in GNU cp, there are only these two statuses.
+.SH DEVIATIONS
+chopin matches GNU cp 9.11 exactly, including its documented quirks,
+except for the entries below. Entries marked
+.B FIX
+are defects in GNU cp that chopin corrects rather than reproduces;
+each has an upstream report and a pinned regression test. Entries
+marked
+.B QUIRK-KEPT
+were investigated and deliberately matched anyway. Entries marked
+.B BUILD-PARITY
+are not deviations: they record the feature set of the GNU build that
+chopin is compared against.
+.\" BEGIN GENERATED DEVIATIONS - edit doc/deviations.md, run make man
+.TP
+.B DEV-001 (FIX)
+double-space backup diagnostic.
+.sp
+GNU: `backing up %s might destroy source;  %s not copied` with two
+spaces after the semicolon (copy.c:1934-1935) - a malformed message,
+quirk register 2. chopin prints a single space.
+Upstream: draft ready; filing recorded here when done.
+Pinned by: dev-tier case (sprint 03).
+.TP
+.B DEV-002 (FIX)
+unquoted symlink-chown failure operand.
+.sp
+GNU: `failed to preserve ownership for %s` prints the destination
+UNQUOTED in the symlink-ownership failure path (copy.c:2579-2580),
+inconsistent with every neighboring diagnostic (quirk register 3).
+chopin quotes it.
+Upstream: draft ready.
+Pinned by: code site (src/copy.c symlink branch). The failure needs
+lchownat to fail with a non-benign errno, which requires privileges
+(chown_failure_ok silences the unprivileged EPERM) - unreachable in
+the root-refusing harness; the fuzz tier cannot draw it either.
+.TP
+.B DEV-003 (QUIRK-KEPT)
+--update=older identical-symlink success.
+.sp
+GNU treats a failed symlink creation as success when the existing
+dest is an identical symlink under --update=older (copy.c:2541-2557);
+GNU's own comment says the behavior "isn't documented, and seems
+wrong". Kept for v0.1: scripts may depend on it; revisit with
+upstream discussion. Matched exactly (sprint 05).
+.TP
+.B DEV-004 (FIX)
+same_nameat abrupt exit.
+.sp
+GNU: same_nameat calls error(1,...) mid-comparison when a parent
+stat fails (lib/same.c:101,139), aborting the whole run instead of
+failing the one file (quirk register 21). chopin reports
+`cannot stat %s` and fails only that file.
+Upstream: draft ready.
+Pinned by: unit (samefile_driver dev004-parent-stat) - the failing
+parent stat needs a mid-comparison race to reach through the CLI, so
+the pin exercises the function surface directly.
+.TP
+.B DEV-005 (FIX)
+sparse_copy hole-punch success-on-failure.
+.sp
+GNU: sparse_copy returns success (0) when create_hole fails mid-file
+(copy-file-data.c:237-238) - cp prints an error yet exits 0 with a
+TRUNCATED destination; in lseek_copy the 0 is misread as "input file
+shrank" (433-437). Data-loss class (quirk register 34). chopin
+propagates the failure: nonzero exit, copy_reg failure envelope.
+Upstream: draft ready.
+Pinned by: code site (create_hole in src/copydata.c returns -1 and
+every caller propagates). A real mid-file punch failure needs an
+environment fault the sandbox cannot stage deterministically (GNU's
+own make_holes gate excludes non-regular dests); sprint 08's
+bounded-ENOSPC fuzz lane exercises the path.
+.TP
+.B DEV-006 (BUILD-PARITY)
+build-configuration parity notes.
+.sp
+Not deviations - chopin matches GNU cp built with the pinned oracle
+feature set (scripts/build-gnu-cp.sh): no SELinux (-Z warn/ignore
+paths), no POSIX-ACL support (mode bits only; ACL xattrs travel via
+the xattr pass), xattr support ON with /etc/xattr.conf exclusions
+not read (golden fixtures use user.* names only; sprint 04).
+.\" END GENERATED DEVIATIONS
 .SH SEE ALSO
 .BR cp (1),
-.BR cpn (1)
+.BR cpn (1),
+.BR install (1),
+.BR mv (1)
+.SH AUTHORS
+Written by mfwolffe. chopin is not part of GNU coreutils and is not
+endorsed by the GNU project; it reimplements the documented behavior
+of GNU cp.
+.SH REPORTING BUGS
+Report bugs at https://github.com/tenseleyFlow/chopin/issues.

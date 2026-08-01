@@ -44,6 +44,10 @@ jobs:
       - run: ./configure
       - run: make
       - run: make check
+      - name: docs generated from the register (man + disposition)
+        run: |
+          make man-check
+          sh scripts/check-register.sh
       - run: make sanitize
       - name: TSan campaign (pool forced on goldens, fuzz, identity)
         if: runner.os == 'Linux'

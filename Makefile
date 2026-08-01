@@ -109,6 +109,34 @@ tsan:
 	$(MAKE) clean
 	$(MAKE) all
 
+# The man page's DEVIATIONS section is GENERATED from the register
+# (sprint 11 locked decision: one source of truth). `make man`
+# re-splices it; `make man-check` fails if the in-tree page has
+# drifted, so CI catches a register edit that never reached the page.
+man: doc/chopin.1 doc/deviations.md scripts/gen-man-deviations.sh
+	@sh scripts/gen-man-deviations.sh > build/dev.roff
+	@awk '/^\.\\" BEGIN GENERATED DEVIATIONS/ { print; system("cat build/dev.roff"); skip=1; next } \
+	      /^\.\\" END GENERATED DEVIATIONS/ { skip=0 } \
+	      skip != 1 { print }' doc/chopin.1 > build/chopin.1.new
+	@if cmp -s build/chopin.1.new doc/chopin.1; then \
+		echo "man: doc/chopin.1 up to date"; \
+	else \
+		cp build/chopin.1.new doc/chopin.1; \
+		echo "man: doc/chopin.1 regenerated from doc/deviations.md"; \
+	fi
+
+# Pure check: never mutates doc/chopin.1, so CI can run it.
+man-check: doc/chopin.1 doc/deviations.md scripts/gen-man-deviations.sh
+	@mkdir -p build
+	@sh scripts/gen-man-deviations.sh > build/dev.roff
+	@awk '/^\.\\" BEGIN GENERATED DEVIATIONS/ { print; system("cat build/dev.roff"); skip=1; next } \
+	      /^\.\\" END GENERATED DEVIATIONS/ { skip=0 } \
+	      skip != 1 { print }' doc/chopin.1 > build/chopin.1.check
+	@cmp -s build/chopin.1.check doc/chopin.1 || { \
+		echo "man-check: doc/chopin.1 is stale; run 'make man' and commit" >&2; \
+		exit 1; }
+	@echo "man-check: generated DEVIATIONS section matches the register"
+
 dist:
 	git archive --format=tar.gz --prefix=chopin-$(VERSION)/ \
 		-o chopin-$(VERSION).tar.gz HEAD
