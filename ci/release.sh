@@ -25,8 +25,18 @@ command -v gmake >/dev/null 2>&1 && MAKE=gmake
 
 echo "== chopin $TAG =="
 
-[ -z "$(git status --porcelain)" ] || {
-    echo "release: working tree not clean" >&2; exit 1; }
+# Uncommitted changes to TRACKED files are disqualifying: the tarball
+# comes from HEAD, so anything uncommitted would ship differently than
+# it was verified. Untracked scratch files cannot reach the tarball,
+# so they only warrant a warning.
+[ -z "$(git status --porcelain -uno)" ] || {
+    echo "release: tracked files have uncommitted changes" >&2
+    git status --short -uno >&2
+    exit 1; }
+if [ -n "$(git status --porcelain)" ]; then
+    echo "release: note - untracked files present (not in the tarball):"
+    git status --short | grep '^??' || true
+fi
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
     echo "release: tag $TAG already exists" >&2; exit 1
 fi
