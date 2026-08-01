@@ -6,7 +6,11 @@
 #   - it has a class ([FIX], [QUIRK-KEPT], [BUILD-PARITY]);
 #   - FIX entries name their pin ("Pinned by:") and their upstream
 #     disposition ("Upstream:");
-#   - every FIX has a draft section in the upstream-reports audit;
+#   - every FIX has a draft section in the upstream-reports audit -
+#     LOCAL ONLY: .docs/ is planning material and is never tracked in
+#     the remote, so this leg is skipped where the audit is absent
+#     (the tracked register's "Upstream:" line is the source of truth
+#     that ships);
 #   - the fuzz deviation filter mentions no ID the register lacks.
 
 set -eu
@@ -46,8 +50,6 @@ for id in $ids; do
         if [ -r "$drafts" ]; then
             grep -q "^## $id" "$drafts" \
                 || bad "$id (FIX) has no upstream draft section"
-        else
-            bad "upstream-reports audit missing"
         fi
         ;;
     esac
@@ -63,7 +65,11 @@ fi
 
 n=$(printf '%s\n' "$ids" | grep -c .)
 if [ "$fails" -eq 0 ]; then
-    echo "register: $n entries, all dispositioned"
+    if [ -r "$drafts" ]; then
+        echo "register: $n entries, all dispositioned (drafts cross-checked)"
+    else
+        echo "register: $n entries, all dispositioned (drafts not present)"
+    fi
     exit 0
 fi
 echo "register: $fails problem(s)" >&2
