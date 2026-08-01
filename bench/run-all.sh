@@ -60,10 +60,12 @@ for lane in $lanes; do
     src="$fix/src"
     dst="$fix/dst"
 
+    # "both" everywhere a cold reading is meaningful: cold is
+    # Linux-only (drop_caches), so a cold-ONLY lane silently
+    # vanishes on macOS/BSD - which is how swarm went unmeasured on
+    # nomad through all of sprint 10. Warm always runs.
     case $lane in
-    swarm)                  temp=cold ;;
-    kernel-tree)            temp=both ;;   # the class bar is WARM fcp
-    large-single|large-nocow) temp=both ;;
+    swarm|kernel-tree|large-single|large-nocow) temp=both ;;
     *)                      temp=warm ;;
     esac
 
