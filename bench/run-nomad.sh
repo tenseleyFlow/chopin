@@ -20,8 +20,13 @@ PATHS="export PATH=/opt/homebrew/bin:\$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/
 
 case "${1:-status}" in
 start)
-    echo "== shipping tree =="
-    git -C "$root" archive HEAD | ssh "$HOST" "$SH \"rm -rf ~/$RDIR && mkdir -p ~/$RDIR && tar -x -C ~/$RDIR\""
+    echo "== shipping tree (build/ preserved) =="
+    # Keep build/: it holds the pinned oracle and tens of GiB of
+    # seeded fixtures that cost far more to rebuild than they cost to
+    # keep. Only tracked sources are replaced. (A blanket rm -rf also
+    # failed mid-flight once on APFS and left a source-less tree.)
+    ssh "$HOST" "$SH \"mkdir -p ~/$RDIR && cd ~/$RDIR && find . -maxdepth 1 -mindepth 1 ! -name build -exec rm -rf {} + \""
+    git -C "$root" archive HEAD | ssh "$HOST" "$SH \"tar -x -C ~/$RDIR\""
     # Uncommitted work in progress must not silently differ from the
     # tables; ship the tracked tree only and say so.
     if [ -n "$(git -C "$root" status --porcelain -- src bench)" ]; then
